@@ -1,0 +1,199 @@
+# note that to use this snakefile, it must be included using -s in the snakemake function
+# 2nd note: this snakefile deals specifically with 10nt barcodes. Because of this, removed 25nt barcode extraction as well as scatter gather implementation
+# config file will now be specified by the snakemake arguments
+
+rule all:
+        input:
+                expand("cluster_barcodes/{sample}.10N.grouped.dist_{dist}.tsv", 
+                sample=config["samples_R1"], 
+                dist=config["dist"])
+
+# this rule will extract barcode
+rule trim_primer_and_spacers:
+        input:
+                R1=lambda wildcards: config["samples_R1"][wildcards.sample],
+                R2=lambda wildcards: config["samples_R2"][wildcards.sample]
+        output:
+                out_R1=temp("trim_primer_and_spacers/{sample}_R1.umi_tools.fastq.gz"),
+                out_R2=temp("trim_primer_and_spacers/{sample}_R2.umi_tools.fastq.gz"),
+                out_log="trim_primer_and_spacers/{sample}.umi_tools.log"
+        params:
+                out_dir=lambda wildcards, output: os.path.dirname(output.out_R1)
+        log:
+                "logs/trim_primer_and_spacers/{sample}.log"
+        resources:
+                mem="1G",
+                partition="medium",
+                time="5-00:00:00",
+                c="1"
+        shell:
+                "set +u; source /n/groups/walsh/indData/Tae/scripts/EXP_00007_Process_Tag_Seq_umi_tools_10nt_snakemake.sh; "
+                "trim_primer_and_spacers "
+                "--read1 {input.R1} "
+                "--read2 {input.R2} "
+                "--output_dir {params.out_dir}"
+
+# split barcodes by 10N (note that it only takes in R1 and output is in fasta)
+rule extract_raw_barcodes:
+        input:
+                R1="trim_primer_and_spacers/{sample}_R1.umi_tools.fastq.gz"
+        output:
+                out_barcode_all="extract_raw_barcodes/{sample}.barcodes.all.txt.gz",
+                out_barcode_10N="extract_raw_barcodes/{sample}.barcodes.10N.txt.gz",
+        params:
+                out_dir=lambda wildcards, output: os.path.dirname(output.out_barcode_all)
+        log:
+                "logs/extract_raw_barcodes/{sample}.log"
+        resources:
+                mem="1G",
+                partition="medium",
+                time="5-00:00:00",
+                c="1"
+        shell: 
+                "set +u; source /n/groups/walsh/indData/Tae/scripts/EXP_00007_Process_Tag_Seq_umi_tools_10nt_snakemake.sh; "
+                "extract_raw_barcodes "
+                "--read1 {input.R1} "
+                "--output_dir {params.out_dir}"
+
+# map reads to custom reference - tag seq luciferase backbone
+rule map_reads:
+        input:
+                R1="trim_primer_and_spacers/{sample}_R1.umi_tools.fastq.gz",
+                R2="trim_primer_and_spacers/{sample}_R2.umi_tools.fastq.gz"
+        output:
+                out_mapped_bam="map_reads/{sample}.bam",
+                out_mapped_bai="map_reads/{sample}.bam.bai"
+        params:
+                out_dir=lambda wildcards, output: os.path.dirname(output.out_mapped_bam),
+                ref_fasta=config["reference_fasta"]["custom"]
+        log:
+                "logs/map_reads/{sample}.log"
+        resources:
+                mem="2G",
+                partition="medium",
+                time="5-00:00:00",
+                c="1"
+        shell:
+                "set +u; source /n/groups/walsh/indData/Tae/scripts/EXP_00007_Process_Tag_Seq_umi_tools_10nt_snakemake.sh; "
+                "map_reads "
+                "--read1 {input.R1} "
+                "--read2 {input.R2} "
+                "--threads 1 "
+                "--ref_fasta {params.ref_fasta} "
+                "--output_dir {params.out_dir}"
+                
+# split bam file into 10N barcodes - this step is done at the bam step to make things easier to manage and keep track of (compared to fastq)
+# also adds a small gene tag (adds caMPRA into the gene tag section)
+# since we are working with a 10nt barcode, scatter and gather implementation is not necessary and would only decrease accuracy and add analysis steps 
+rule segregate_barcodes_tag:
+        input:
+                in_bam="map_reads/{sample}.bam",
+                in_bam_bai="map_reads/{sample}.bam.bai"
+        output:
+                out_bam="segregate_barcodes_tag/{sample}.10N.bam",
+                out_idx="segregate_barcodes_tag/{sample}.10N.bam.bai"
+        params:
+                out_dir="segregate_barcodes_tag"
+        log:
+                "logs/segregate_barcodes_tag/{sample}.log"
+        resources:
+                mem="1G",
+                partition="medium",
+                time="5-00:00:00",
+                c="1"
+        shell:
+                "set +u; source /n/groups/walsh/indData/Tae/scripts/EXP_00007_Process_Tag_Seq_umi_tools_10nt_snakemake.sh; "
+                "segregate_barcodes_tag "
+                "--input_bam {input.in_bam} "
+                "--output_dir {params.out_dir} "
+                "--gene caMPRA"
+
+# group by umi_tools
+rule cluster_barcodes:
+        input:
+                in_10N_bam="segregate_barcodes_tag/{sample}.10N.bam",
+        output:
+                out_clustered_barcodes_10N="cluster_barcodes/{sample}.10N.grouped.dist_{dist}.tsv",
+        params:
+                out_dir=lambda wildcards, output: os.path.dirname(output.out_clustered_barcodes_10N),
+                dist=config["dist"]
+        benchmark:
+                "benchmarks/cluster_barcodes/{sample}_dist_{dist}.txt"
+        log:
+                "logs/cluster_barcodes/{sample}_dist_{dist}.log"
+        resources:
+                mem="200G",
+                partition="medium",
+                time="5-00:00:00",
+                c="1"
+        shell:
+                "set +u; source /n/groups/walsh/indData/Tae/scripts/EXP_00007_Process_Tag_Seq_umi_tools_10nt_snakemake.sh; "
+                "cluster_barcodes "
+                "--input_bam {input.in_10N_bam} "
+                "--output_dir {params.out_dir} "
+                "--dist {params.dist}; "
+
+# cluster and count barcodes (slight alternative to above)
+#rule cluster_count_barcodes:
+#        input:
+#                in_split_10N_bam="segregate_barcodes_tag_and_split/{sample}_split/{sample}.10N.split.{i}.bam",
+#                in_split_25N_bam="segregate_barcodes_tag_and_split/{sample}_split/{sample}.25N.split.{i}.bam"
+#        output:
+#                out_clustered_count_barcodes_10N="cluster_count_barcodes/{sample}/{sample}.10N.split.{i}.count.dist_{dist}.tsv",
+#                out_clustered_count_barcodes_25N="cluster_count_barcodes/{sample}/{sample}.25N.split.{i}.count.dist_{dist}.tsv"
+#        params:
+#                out_dir=lambda wildcards, output: os.path.dirname(output.out_clustered_count_barcodes_25N),
+#                dist=config["dist"]
+#        benchmark:
+#                "benchmarks/cluster_count_barcodes/{sample}_{i}_dist_{dist}.txt"
+#        log:
+#                "logs/cluster_count_barcodes/{sample}_{i}_dist_{dist}.log"
+#        resources:
+#                mem="100G",
+#                partition="medium",
+#                time="3-00:00:00",
+#                c="1"
+#        shell:
+#                "set +u; source /n/groups/walsh/indData/Tae/scripts/EXP_00007_Process_Tag_Seq_umi_tools_snakemake.sh; "
+#                "cluster_count_barcodes "
+#                "--input_bam {input.in_split_10N_bam} "
+#                "--output_dir {params.out_dir} "
+#                "--dist {params.dist}; "
+#                "cluster_count_barcodes  "
+#                "--input_bam {input.in_split_25N_bam} "
+#                "--output_dir {params.out_dir} "
+#                "--dist {params.dist}"
+
+#def aggregate_input(wildcards):
+#        checkpoint_output = checkpoints.segregate_barcodes_tag_and_split.get(**wildcards).output.out_split
+#        out_cluster_10N_files = expand("cluster_barcodes/{sample}/{sample}.10N.split.{i}.grouped.dist_{dist}.tsv",
+#                sample=wildcards.sample,
+#                i=glob_wildcards(os.path.join(checkpoint_output, "{sample}.10N.split.{i}.bam")).i,
+#                dist=config["dist"])
+#        
+#        out_cluster_25N_files = expand("cluster_barcodes/{sample}/{sample}.25N.split.{i}.grouped.dist_{dist}.tsv",
+#                sample=wildcards.sample,
+#                i=glob_wildcards(os.path.join(checkpoint_output, "{sample}.25N.split.{i}.bam")).i,
+#                dist=config["dist"])
+        
+                #        out_cluster_count_10N_files = expand("cluster_count_barcodes/{sample}/{sample}.10N.split.{i}.count.dist_{dist}.tsv",
+                #                sample=wildcards.sample,
+                #                i=glob_wildcards(os.path.join(checkpoint_output, "{sample}.10N.split.{i}.bam")).i,
+                #                dist=config["dist"])
+                #        
+                #        out_cluster_count_25N_files = expand("cluster_count_barcodes/{sample}/{sample}.25N.split.{i}.count.dist_{dist}.tsv",
+                #                sample=wildcards.sample,
+                #                i=glob_wildcards(os.path.join(checkpoint_output, "{sample}.25N.split.{i}.bam")).i,
+                #                dist=config["dist"])
+                
+#        return out_cluster_10N_files + out_cluster_25N_files # +  out_cluster_count_10N_files + out_cluster_count_25N_files
+
+#rule aggregate:
+#        input:
+#                aggregate_input
+#        output:
+#                "aggregate/{sample}.list"
+#        shell:
+#                "cat {input} > {output}"
+#
+        
