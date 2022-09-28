@@ -1,0 +1,659 @@
+---
+title: "EXP_00027_SCZ_Variant_Validation"
+output: html_notebook
+---
+
+# read in library
+```{r, library, warning=FALSE}
+library(tidyverse)
+library(ggpubr)
+library(knitr)
+library(plyranges)
+library(stringi)
+library(tidygenomics)
+library(fuzzyjoin)
+
+# to allow for getting ref and fasta
+library(BSgenome.Hsapiens.UCSC.hg19)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(rsnps)
+
+# source functions
+source("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Eduardo/FASTA_extraction_functions.R")
+# load custom functions
+source(file = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00021_HAR_3091_3094_Saturation_Mut_MPRA_Analysis/scripts/EXP_00021_HAR_3091_3094_Saturation_Mut_MPRA_Analysis_custom_functions.R")
+```
+
+# NOTE
+Important note is that since granges is 1-indexed, with be using start, end, but in 1 index, rather than 0 index of bed files
+
+
+
+# MPRA positive and negative controls
+Try to add in positive and negative controls
+Will add SCZ MPRA positive and negative controls
+```{r, positive and negative controls SCZ MPRA}
+# read in data (removed NAs)
+SCZ_alleles <- readxl::read_xlsx("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Eduardo/Myint_2019_SCZ_MPRA_Paper/ajmgb32761-sup-0002-tables1_modified.xlsx", sheet = "ALL_SNP_results")
+
+SCZ_alleles_long <- SCZ_alleles %>%
+  pivot_longer(cols = starts_with("max"),
+               names_to = "name",
+               values_to = "max_cv") %>%
+  separate(col = name, into = c("D1", "D2", "cell_type", "ALT", "threshold")) %>%
+  dplyr::select(-c(D1, D2)) %>%
+  dplyr::mutate(max_cv = as.numeric(max_cv))
+
+# visualize SCZ_allele information
+SCZ_alleles_scatter_plot <- SCZ_alleles_long %>%
+  ggplot() +
+  geom_point(aes(x = max_cv, y = `adj_F_pval (SH-SY5Y)`, color = `adj_F_pval (SH-SY5Y)` < 0.05)) +
+  facet_wrap(~cell_type + threshold) +
+  theme_pubr()
+
+SCZ_alleles_density_plot <- SCZ_alleles_long %>%
+  ggplot() +
+  geom_density(aes(x = max_cv, color = `adj_F_pval (SH-SY5Y)` < 0.05)) +
+  facet_wrap(~cell_type + threshold) +
+  theme_pubr()
+
+ggsave(SCZ_alleles_scatter_plot, filename = "plots/SCZ_alleles_scatter_plot.pdf")
+
+ggsave(SCZ_alleles_density_plot, filename = "plots/SCZ_alleles_density_plot.pdf")
+
+include_graphics("plots/SCZ_alleles_density_plot.pdf")
+```
+
+# filter out and select negative controls
+```{r, selected controls SCZ MPRA}
+# filter out positive controls
+# hg38
+SCZ_MPRA_positive_controls <- SCZ_alleles_long %>%
+  dplyr::filter(!is.na(max_cv) &
+                  `adj_F_pval (SH-SY5Y)` < 0.05 &
+                  `adj_F_pval (K562)` < 0.05 &
+                  cell_type == "shsy5y" & 
+                  threshold == "thresh10" &
+                  max_cv < 1 | (!is.na(max_cv) &
+                  `adj_F_pval (SH-SY5Y)` < 0.05 &
+                  `adj_F_pval (K562)` < 0.05 &
+                  cell_type == "shsy5y" & 
+                  threshold == "thresh10" & snp_id %in% c("rs73036086", "rs2439202", "rs6801235", "rs134873", "rs13250438", "rs2605039", "rs7582536", "rs1658810", "rs8061552")))
+
+# add negative controls
+set.seed(1234)
+SCZ_MPRA_negative_controls <- SCZ_alleles_long %>%
+  dplyr::filter(!is.na(max_cv) &
+                  `adj_F_pval (SH-SY5Y)` > 0.5 &
+                  `adj_F_pval (K562)` > 0.5 &
+                  cell_type == "shsy5y" & 
+                  threshold == "thresh10" &
+                  max_cv < 1) %>%
+  slice_sample(n = 10)
+
+#write_tsv(SCZ_MPRA_positive_controls, file = "saved_data/SCZ_MPRA_positive_controls.txt")
+
+#write_tsv(SCZ_MPRA_negative_controls, file = "saved_data/SCZ_MPRA_negative_controls.txt")
+
+# format controls
+SCZ_MPRA_controls <- bind_rows(
+  SCZ_MPRA_positive_controls %>%
+    dplyr::rename(chr = chromosome,
+                  alt = ALT) %>%
+    # turns out they have all the locations off by ...
+    dplyr::mutate(start = snp_loc + 1,
+                  end = snp_loc + 1),
+   SCZ_MPRA_negative_controls %>%
+    dplyr::rename(chr = chromosome,
+                  alt = ALT) %>%
+    # turns out they have all the locations off by ...
+    dplyr::mutate(start = snp_loc + 1,
+                  end = snp_loc + 1)
+) %>%
+  dplyr::select(chr, start, end, alt, snp_id)
+
+# add in dbsnp information to correct stuff
+SCZ_MPRA_controls_dbsnp <- ncbi_snp_query(SCZ_MPRA_controls$snp_id)
+
+# given weirdness of annotation from the paper, just use the dbsnp id to make list of variants
+SCZ_MPRA_control_fragments <- SCZ_MPRA_controls_dbsnp %>%
+  distinct() %>%
+  dplyr::select(query, chromosome, bp, ancestral_allele, alleles) %>%
+  separate_rows(alleles, sep = ",") %>%
+  dplyr::filter(ancestral_allele != alleles) %>%
+  dplyr::mutate(start = bp) %>%
+  dplyr::rename(allele_id = query, chr = chromosome, end = bp, ref = ancestral_allele, alt = alleles)
+
+
+```
+
+These aren't ideal but provide some SCZ SNPs that would be good to test.
+
+There are 16 positive controls and 10 negative controls. There are 26 variants, which represents a maximum of 52 fragments (some alleles are from same site so we only need 1 ref per site). At 10 barcodes per fragment, we have a maximum of 520 oligos need for this
+
+# add 3 variants from TRIM study (luciferase validated experiment)
+https://www.nature.com/articles/s41380-020-00877-2
+# hg38
+
+"PGL-CAG, the A allele of rs5011218 was mutated into the C allele; PGL-ATG, the A allele of rs11191359 was mutated into the T allele; PGL-AAA, the G allele of rs4146428 was mutated into the A allele"
+
+hg38
+rs5011218  - chr10:102641461
+rs11191359 - chr10:102641729
+rs4146428 - chr10:102641964 
+
+```{r, TRIM SCZ luciferase}
+TRIM_SCZ <- tibble(chr = c("chr10", "chr10", "chr10"),
+                   start = c(102641461, 102641729, 102641964),
+                   end = c(102641461, 102641729, 102641964),
+                   ref = c("A", "A", "G"),
+                   alt = c("C", "T", "A"),
+                   snp_id = c("rs5011218", "rs11191359", "rs4146428"),
+                   assembly = c("hg38", "hg38", "hg38"),
+                   sequence_type = c("TRIM_SCZ", "TRIM_SCZ", "TRIM_SCZ"))
+write_tsv(TRIM_SCZ, file = "saved_data/TRIM_SCZ.txt")
+```
+
+
+Since there are 3 variants, we have 6 fragments, or 60 oligos for this
+
+# add in positive and negative controls from caMPRA experiment
+Since we have caMPRA data we can use as benchmark, we can actually pick positive and negative controls from caMPRA - focus on picking some from HARs, CNEs, VEs (as reference)
+
+```{r, read data for caMPRA based positive and negative controls}
+# this is to resume analysis/visualizations
+# regular stringency
+HAR_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00020_HAR_NE_UCE_con_pD2_Day_1-3_caMPRA_Analysis/saved_data/HAR_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined.txt")
+NE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00020_HAR_NE_UCE_con_pD2_Day_1-3_caMPRA_Analysis/saved_data/NE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined.txt")
+UCE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00020_HAR_NE_UCE_con_pD2_Day_1-3_caMPRA_Analysis/saved_data/UCE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined.txt")
+
+# add in element information
+# each probe should be assigned to the appropriate HAR (with necessary subsequence number/letter)
+
+# map of probe to HAR
+# targeted region information
+# save HAR capture bed file (with info for deepsea)
+HAR_designed_barcode_info <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00020_HAR_NE_UCE_con_pD2_Day_1-3_caMPRA_Analysis/saved_data/HAR_captures_hg19_mip_key.txt", 
+                                      col_names = c("chr", "start", "end", "mip_key", "feature_name"))
+
+
+# NE
+NE_barcode_info <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00016_NE_UCE_con_caMPRA_Analysis/NE_UCE_con_data/NE_captures_with_barcode_names.txt") %>%
+  dplyr::mutate(region_type = "NE",
+                chr = as.character(chr),
+                feature_chr = as.character(feature_chr))
+
+
+# NEx
+NEx_designed_barcode_info <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00016_NE_UCE_con_caMPRA_Analysis/NE_UCE_con_data/NEx_captures_with_barcode_names.txt") %>%
+  dplyr::mutate(region_type = "NE")
+
+# PAR
+PAR_designed_barcode_info <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00016_NE_UCE_con_caMPRA_Analysis/NE_UCE_con_data/PAR_captures_with_barcode_names.txt", col_types = "cddccccddc") %>%
+  dplyr::mutate(region_type = "PAR")
+
+# UCE
+UCE_designed_barcode_info <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00016_NE_UCE_con_caMPRA_Analysis/NE_UCE_con_data/UCE_captures_with_barcode_names.txt", col_types = "cddccccddc") %>%
+  dplyr::mutate(region_type = "VE")
+
+# combined barcode information (HARs included)
+HAR_NE_UCE_PAR_probe_element_barcode_info <- bind_rows(HAR_designed_barcode_info, NE_barcode_info, NEx_designed_barcode_info, PAR_designed_barcode_info, UCE_designed_barcode_info) %>%
+  dplyr::select(chr, start, end, mip_key, feature_name) %>%
+  distinct()
+
+# adjust names to be more reader friendly
+HAR_CNE_VE_PAR_probe_element_probe_named <- HAR_NE_UCE_PAR_probe_element_barcode_info %>%
+  # name readable names
+  dplyr::mutate(readable_name = case_when(str_detect(feature_name, "HARsv2") ~ str_replace(feature_name, "HARsv2_", "HAR "),
+                                          str_detect(feature_name, "CNE_") ~ str_replace(feature_name, "CNE_", "CNE "),
+                                          str_detect(feature_name, "UCE_") ~ str_replace(feature_name, "UCE_", "VE "),
+                                          str_detect(feature_name, "PARs_") ~ str_replace(feature_name, "PARs_", "PAR "),
+                                          str_detect(feature_name, "CNEx_") ~ str_replace(feature_name, "CNEx_", "CNEx "))) %>%
+  # add probe_specific numbers
+  dplyr::group_by(readable_name) %>%
+  dplyr::mutate(probe_element_name = paste0(readable_name, LETTERS[row_number()]),
+                probe_element_name = str_remove(probe_element_name, "\\b0+"))
+
+# add probe information to combined stat file
+HAR_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named <- left_join(
+  HAR_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined,
+  HAR_CNE_VE_PAR_probe_element_probe_named,
+  by = c("probe" = "mip_key")) %>%
+  # rank by pvalue for increased expression probes
+  dplyr::mutate(expression_change = case_when(median_log2_TPM_ratio > 0 ~ "positive",
+                                              TRUE ~ "negative")) %>%
+  dplyr::group_by(time_cDNA, expression_change) %>%
+  dplyr::arrange(desc(median_log2_TPM_ratio)) %>%
+  dplyr::mutate(expression_rank = row_number())
+
+NE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named <- left_join(
+  NE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined,
+  HAR_CNE_VE_PAR_probe_element_probe_named,
+  by = c("probe" = "mip_key")) %>%
+  # rank by pvalue for increased expression probes
+  dplyr::mutate(expression_change = case_when(median_log2_TPM_ratio > 0 ~ "positive",
+                                              TRUE ~ "negative")) %>%
+  dplyr::group_by(time_cDNA, expression_change) %>%
+  dplyr::arrange(desc(median_log2_TPM_ratio)) %>%
+  dplyr::mutate(expression_rank = row_number())
+
+# VE PAR CNEx
+UCE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named <- left_join(
+  UCE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined,
+  HAR_CNE_VE_PAR_probe_element_probe_named,
+  by = c("probe" = "mip_key")) %>%
+  # rank by pvalue for increased expression probes
+  dplyr::mutate(expression_change = case_when(median_log2_TPM_ratio > 0 ~ "positive",
+                                              TRUE ~ "negative")) %>%
+  dplyr::group_by(time_cDNA, expression_change) %>%
+  dplyr::arrange(desc(median_log2_TPM_ratio)) %>%
+  dplyr::mutate(expression_rank = row_number())
+
+```
+
+
+
+```{r, select caMPRA positive and negative controls}
+# from each of the 3 pools pull
+# hg19
+set.seed(1234)
+CNE_positive_control <- NE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named %>%
+  ungroup() %>%
+  dplyr::filter(p.adj < 0.05 & time_cDNA == "day_3") %>%
+  dplyr::arrange(median_log2_TPM_ratio) %>%
+  dplyr::mutate(row_length = n()) %>%
+  dplyr::slice(round(runif(6, 
+                    min = 1, 
+                    max = row_length
+                    )))
+
+HAR_positive_control <- HAR_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named %>%
+  ungroup() %>%
+  dplyr::filter(p.adj < 0.05 & time_cDNA == "day_3") %>%
+  dplyr::arrange(median_log2_TPM_ratio) %>%
+  dplyr::mutate(row_length = n()) %>%
+  dplyr::slice(round(runif(6, 
+                    min = 1, 
+                    max = row_length
+                    )))
+
+CNEx_PAR_VE_positive_control <- UCE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named %>%
+  ungroup() %>%
+  dplyr::filter(p.adj < 0.05 & time_cDNA == "day_3") %>%
+  dplyr::arrange(median_log2_TPM_ratio) %>%
+  dplyr::mutate(row_length = n()) %>%
+  dplyr::slice(round(runif(6, 
+                    min = 1, 
+                    max = row_length
+                    )))
+# add more negative controls because these are comparisons
+# negative controls
+CNE_negative_control <- NE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named %>%
+  ungroup() %>%
+  dplyr::filter(p.adj > 0.5 & time_cDNA == "day_3") %>%
+  dplyr::arrange(median_log2_TPM_ratio) %>%
+  dplyr::mutate(row_length = n()) %>%
+  dplyr::slice(round(runif(6, 
+                    min = 1, 
+                    max = row_length
+                    )))
+
+HAR_negative_control <- HAR_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named %>%
+  ungroup() %>%
+  dplyr::filter(p.adj > 0.5 & time_cDNA == "day_3") %>%
+  dplyr::arrange(median_log2_TPM_ratio) %>%
+  dplyr::mutate(row_length = n()) %>%
+  dplyr::slice(round(runif(6, 
+                    min = 1, 
+                    max = row_length
+                    )))
+
+
+CNEx_PAR_VE_negative_control <- UCE_collapsed_annotated_barcodes_normalized_log_transformed_5_rep_read_filtered_stats_combined_named %>%
+  ungroup() %>%
+  dplyr::filter(p.adj > 0.5 & time_cDNA == "day_3") %>%
+  dplyr::arrange(median_log2_TPM_ratio) %>%
+  dplyr::mutate(row_length = n()) %>%
+  dplyr::slice(round(runif(6, 
+                    min = 1, 
+                    max = row_length
+                    )))
+
+
+# combine
+caMPRA_positive_controls <- bind_rows(HAR_positive_control, CNE_positive_control, CNEx_PAR_VE_positive_control)
+
+caMPRA_negative_controls <- bind_rows(HAR_negative_control, CNE_negative_control, CNEx_PAR_VE_negative_control)
+
+write_tsv(caMPRA_positive_controls, file = "saved_data/caMPRA_positive_controls_6_each.txt")
+
+write_tsv(caMPRA_negative_controls, file = "saved_data/caMPRA_negative_controls_6_each.txt")
+
+caMPRA_controls <- bind_rows(
+  caMPRA_positive_controls %>%
+    dplyr::mutate(sequence_type = "caMPRA_positive_controls"),
+  caMPRA_negative_controls %>%
+    dplyr::mutate(sequence_type = "caMPRA_negative_controls")
+) %>%
+  dplyr::select(chr, start, end, probe_element_name) %>%
+  dplyr::mutate(start = start + 1) %>%
+  dplyr::rename(fragment = probe_element_name)
+
+```
+
+Used uniform distribution to sample a range of expression changes, for both positive and negative controls (6 from each pool, so 18 positive control, and 18 negative controls or 36 in total) (they don't have variants)
+
+If we assign 10 barcodes per fragment, we have 360 that are controls from caMPRA
+
+# Saturation mutagenesis MPRA based controls
+As the above elements are actually kind of long, will need 
+```{r, sat mut controls}
+HAR_sat_mut_collapsed_stats_variant_annotated <- read_tsv(
+  "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00021_HAR_3091_3094_Saturation_Mut_MPRA_Analysis/saved_data/HAR_sat_mut_collapsed_stats_variant_annotated.txt")
+
+HAR_w_padding <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/HAR_Validation/EXP_00014_HAR_Validation/Saved_Data/HAR_w_padding.txt") %>%
+  dplyr::mutate(region_w_padding_formatted = str_to_upper(region_w_padding)) %>%
+  dplyr::rename(target_name = HAR,
+                region_sequence = region_w_padding)
+
+oligo_sequence_barcodes <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/HAR_Validation/EXP_00014_HAR_Validation/Saved_Data/all_oligo_sequences.txt") %>%
+  dplyr::rename(sequence_w_mut = test_sequence) %>%
+  feature_barcode_annotation(., HAR_w_padding)
+
+# negative control
+set.seed(1238)
+HAR_sat_mut_negative_control <- 
+  HAR_sat_mut_collapsed_stats_variant_annotated %>%
+  ungroup() %>%
+  dplyr::filter(p.adj > 0.5) %>%
+  dplyr::arrange(mean_log2_TPM_ratio) %>%
+  dplyr::mutate(row_length = dplyr::n()) %>%
+  dplyr::slice(round(runif(10, 
+                    min = 1, 
+                    max = row_length
+                    )))
+# positive control
+HAR_sat_mut_positive_control <- 
+  HAR_sat_mut_collapsed_stats_variant_annotated %>%
+  ungroup() %>%
+  dplyr::filter(p.adj < 0.05) %>%
+  dplyr::arrange(mean_log2_TPM_ratio) %>%
+  dplyr::mutate(row_length = dplyr::n()) %>%
+  dplyr::slice(round(runif(10, 
+                    min = 1, 
+                    max = row_length
+                    )))
+# just controls
+HAR_sat_mut_controls <- 
+  HAR_sat_mut_collapsed_stats_variant_annotated %>%
+  ungroup() %>%
+  dplyr::filter(str_detect(probe, "control"))
+
+# add sequence information
+HAR_sat_mut_negative_control_w_fasta <-
+  left_join(
+    HAR_sat_mut_negative_control,
+    oligo_sequence_barcodes$region_barcode_df_mut_annotated %>%
+      dplyr::select(-c(barcodes, barcode_rev, full_oligo)) %>%
+      distinct(),
+    by = c("probe" = "seq_id"))
+
+HAR_sat_mut_positive_control_w_fasta <-
+  left_join(
+    HAR_sat_mut_positive_control,
+    oligo_sequence_barcodes$region_barcode_df_mut_annotated %>%
+      dplyr::select(-c(barcodes, barcode_rev, full_oligo)) %>%
+      distinct(),
+    by = c("probe" = "seq_id"))
+
+HAR_sat_mut_controls_w_fasta <-
+  left_join(
+    HAR_sat_mut_controls %>%
+      dplyr::mutate(starting_location = as.numeric(str_split(sub_sequence, "_", simplify = TRUE)[,3])),
+    oligo_sequence_barcodes$region_barcode_df_closest_match_annotated %>%
+  dplyr::filter(sequence_type == "control") %>%
+      dplyr::select(-c(barcodes, barcode_rev, full_oligo)) %>%
+      distinct(),
+    by = c("HAR" = "target_name", "starting_location" = "starting_location"))
+
+```
+
+
+# Eduardo's variants
+These are the actual variants of interest that we will be testing (all of the above are for testing)
+
+```{r, E_SCZ_variants}
+# hg19
+E_SCZ_variants <- read_csv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Eduardo/variants_to_functionally_validate_2022-06-12_with_extra.csv") %>%
+  dplyr::mutate(start = pos) %>%
+  dplyr::rename(chr = chrom, end = pos, ref = REF, alt = ALT)
+```
+
+There are 31 variants, which represents 62 fragments or 620 oligos
+
+That makes up a total of 2000 oligos (max - probably slightly less)
+
+
+# Final list of variants
+```{r, final variant list prep}
+# load genomes
+hg19_genome <- BSgenome.Hsapiens.UCSC.hg19
+hg38_genome <- BSgenome.Hsapiens.UCSC.hg38
+
+
+# already has fasta # 26 fragments
+HAR_sat_mut_all_controls_w_fasta_formatted <- bind_rows(
+  HAR_sat_mut_negative_control_w_fasta,
+  HAR_sat_mut_positive_control_w_fasta,
+  HAR_sat_mut_controls_w_fasta) %>%
+  dplyr::select(probe, sequence_w_mut) %>%
+  dplyr::rename(fragment_name = probe,
+                fragment_sequence = sequence_w_mut) %>%
+  distinct()
+
+# hg19
+# will probably need to shorten (so not great controls - however, the saturation mut probes might be better)
+caMPRA_controls_w_fasta <- 
+  extract_ref_sequences(
+  df = caMPRA_controls %>%
+    # change so that new probes are mid points of caMPRA probes
+    dplyr::mutate(mid = (start+end)/2) %>%
+    dplyr::mutate(start = mid, end = mid) %>%
+  dplyr::mutate(
+    strand = "*",
+    allele_id = str_replace(fragment, " ", "_")),
+  flank_dist = 120,
+  reference = hg19_genome)
+
+# 80 fragments
+caMPRA_controls_w_fasta_formatted <- caMPRA_controls_w_fasta %>%
+  dplyr::select(allele_id, wt_sequence) %>%
+  dplyr::rename(fragment_name = allele_id,
+                fragment_sequence = wt_sequence) %>%
+  distinct()
+
+# Eduardo's variants
+E_SCZ_variants_w_fasta <- 
+  extract_ref_mut_sequences(
+  df = E_SCZ_variants %>% 
+    dplyr::mutate(allele_id = paste(sample_id, chr, start, ref, alt, sep = "_")),
+  flank_dist = 120,
+  reference = hg19_genome)
+
+E_SCZ_variants_w_fasta_formatted <- E_SCZ_variants_w_fasta %>%
+  dplyr::select(allele_id, wt_sequence, mt_sequence) %>%
+  pivot_longer(cols = wt_sequence:mt_sequence, names_to = "sequence_name", values_to = "fragment_sequence") %>%
+  separate(sequence_name, into = c("genotype", "drop")) %>%
+  dplyr::mutate(fragment_name = paste(allele_id, genotype, sep = "_")) %>%
+  dplyr::select(-c(drop, allele_id, genotype)) %>%
+  distinct()
+
+# variants
+# hg38
+SCZ_MPRA_controls_w_fasta <- extract_ref_mut_sequences(
+  df = SCZ_MPRA_control_fragments,
+  flank_dist = 120,
+  reference = hg38_genome)
+
+SCZ_MPRA_controls_w_fasta_formatted <- SCZ_MPRA_controls_w_fasta %>%
+  dplyr::select(allele_id, wt_sequence, mt_sequence, ref, alt) %>%
+  pivot_longer(cols = wt_sequence:mt_sequence, names_to = "sequence_name", values_to = "fragment_sequence") %>%
+  separate(sequence_name, into = c("genotype", "drop")) %>%
+  dplyr::mutate(fragment_name = case_when(genotype == "wt" ~ paste(allele_id, genotype, sep = "_"),
+                                          genotype == "mt" ~ paste(allele_id, genotype, ref, alt, sep = "_"))) %>%
+  dplyr::select(-c(drop, allele_id, genotype, ref, alt)) %>%
+  distinct()
+
+
+TRIM_SCZ_w_fasta <- extract_ref_mut_sequences(
+  df = TRIM_SCZ %>% dplyr::rename(allele_id = snp_id),
+  flank_dist = 120,
+  reference = hg38_genome)
+
+TRIM_SCZ_w_fasta_formatted <- TRIM_SCZ_w_fasta %>%
+  dplyr::select(allele_id, wt_sequence, mt_sequence, ref, alt) %>%
+  pivot_longer(cols = wt_sequence:mt_sequence, names_to = "sequence_name", values_to = "fragment_sequence") %>%
+  separate(sequence_name, into = c("genotype", "drop")) %>%
+  dplyr::mutate(fragment_name = case_when(genotype == "wt" ~ paste(allele_id, genotype, sep = "_"),
+                                          genotype == "mt" ~ paste(allele_id, genotype, ref, alt, sep = "_"))) %>%
+  dplyr::select(-c(drop, allele_id, genotype, ref, alt)) %>%
+  distinct()
+
+# combined fasta
+SCZ_variant_validation_fasta <- bind_rows(
+  HAR_sat_mut_all_controls_w_fasta_formatted,
+  caMPRA_controls_w_fasta_formatted,
+  E_SCZ_variants_w_fasta_formatted,
+  SCZ_MPRA_controls_w_fasta_formatted,
+  TRIM_SCZ_w_fasta_formatted
+)
+
+#pre decrease in probe number
+#write_tsv(SCZ_variant_validation_fasta, file = "saved_data/SCZ_variant_validation_fasta.txt")
+
+write_tsv(SCZ_variant_validation_fasta, file = "saved_data/SCZ_variant_validation_fasta_updated.txt")
+
+```
+
+
+# editing of problematic probes
+So it turns out that there are issues with 9 of the probes, where 4 of them contain PspXI_RE sites, while 5 contain SfiI RE sites...
+ 
+The affected probes are:
+PspXI probes -
+CMC_MSSM_224_chr9_25677627_A_C_wt
+CMC_MSSM_224_chr9_25677627_A_C_mt
+CMC_MSSM_340_chr11_18656210_A_C_wt
+CMC_MSSM_340_chr11_18656210_A_C_mt
+SfiI probes -
+CMC_MSSM_199_chrX_3733836_T_G_wt
+CMC_MSSM_199_chrX_3733836_T_G_mt
+CMC_MSSM_343_chr1_28099835_T_G_wt
+CMC_MSSM_343_chr1_28099835_T_G_mt
+CMC_PITT_118_chr3_150321366_G_C_wt
+(so CMC_PITT_118_chr3_150321366_G_C_mt actually has a variant in the RE site, so hence is not affected) - but might want to make an adjusted version so we can more directly compare the effect of the variant. Can leave the normal mt sequence in place
+
+Fortunately none of these are the recurrent variants that we want to test. However, we will try to salvage the probes that we can. To do so, we will overlap TFBS motifs (JASPAR) over the elements and if RE site does not overlap with a TF site (or an informative position on the motif), we will mutate a base so that it is not cut. Note that this element will need to retested in luciferase assay if we find it interesting.
+
+PWMscan was used to compute TFBS overlap on the O2 cluster
+(script: EXP_00027_SCZ_pwmscan_check.sh)
+
+```{r, TFBS analysis}
+# read in TFBS
+JASPAR_TFBS <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Eduardo/saved_data/SCZ_variant_validation_all_motif.tsv.gz", col_names = c("fragment", "TF_start", "TF_end", "TF_name", "unknown", "p_value_0_1000_scale", "strand"))
+
+
+# filtered for probes and TFs exceeding 400 (p < 10^-4)
+probes_of_interest <- c(
+  "CMC_MSSM_224_chr9_25677627_A_C_wt",
+  "CMC_MSSM_224_chr9_25677627_A_C_mt",
+  "CMC_MSSM_340_chr11_18656210_A_C_wt",
+  "CMC_MSSM_340_chr11_18656210_A_C_mt",
+  "CMC_MSSM_199_chrX_3733836_T_G_wt",
+  "CMC_MSSM_199_chrX_3733836_T_G_mt",
+  "CMC_MSSM_343_chr1_28099835_T_G_wt",
+  "CMC_MSSM_343_chr1_28099835_T_G_mt",
+  "CMC_PITT_118_chr3_150321366_G_C_wt",
+  "CMC_PITT_118_chr3_150321366_G_C_mt"
+)
+
+# assuming PWMSCAN is 0-based index (currently from 0-240), then variant is at 121 in 1-based index, so 120-121. Need to keep this in mind
+SCZ_variant_validation_RE_scan <- SCZ_variant_validation_fasta %>%
+              # find location of PspXI site and SfiI sites
+              dplyr::mutate(
+                AsisI_site_start = str_locate(fragment_sequence, "GCGATCGC")[,1],
+                AsisI_site_end = str_locate(fragment_sequence, "GCGATCGC")[,2],
+                PspXI_site_start = str_locate(fragment_sequence, "CTCGAG")[,1],
+                PspXI_site_end = str_locate(fragment_sequence, "CTCGAG")[,2],
+                SfiI_site_start = str_locate(fragment_sequence, "GGCC\\w{5}GGCC")[,1],
+                SfiI_site_end = str_locate(fragment_sequence, "GGCC\\w{5}GGCC")[,2]) %>%
+  dplyr::filter(!(is.na(AsisI_site_start) & 
+                  is.na(AsisI_site_end) & 
+                  is.na(PspXI_site_start) & 
+                  is.na(PspXI_site_end) & 
+                  is.na(SfiI_site_start) & 
+                  is.na(SfiI_site_end))) %>%
+  pivot_longer(cols = AsisI_site_start:SfiI_site_end,
+               names_to = "RE_site",
+               values_to = "site") %>%
+  dplyr::filter(!is.na(site)) %>%
+  separate(col = RE_site, into = c("RE_site", "drop", "position")) %>%
+  dplyr::select(-drop) %>%
+  pivot_wider(names_from = position,
+              values_from = site)
+
+
+JASPAR_TFBS_problematic_probes <- JASPAR_TFBS %>%
+  dplyr::filter(fragment %in% probes_of_interest & p_value_0_1000_scale > 400) %>%
+  dplyr::mutate(variant_start = 120, variant_end = 121) %>%
+  genome_join(., 
+            SCZ_variant_validation_RE_scan, 
+            by = c("fragment" = "fragment_name", "TF_start" = "start", "TF_end" = "end"),
+            mode = "right")
+JASPAR_TFBS_problematic_probes
+```
+
+So it looks like the PspXI site containing fragments are fine (we can just change of on the bases) but all SfiI containing fragments seem to have an overlap with a RE site... will need to manually inspect modify unimportant bases
+
+
+```{r,}
+# pull out sequence of the TF overlap and SfiI overlap
+JASPAR_TFBS_problematic_probes_overlaping_sequences <- JASPAR_TFBS_problematic_probes %>%
+  dplyr::mutate(min_start = pmin(TF_start, start),
+                max_end = pmax(TF_end, end),
+                overlapping_sequence = str_sub(fragment_sequence, start = min_start, end = max_end))
+
+
+```
+
+```{r, CMC_MSSM_199_chrX_3733836_T_G_mt}
+# SfiI
+## TFAP2C - front G - C
+## TFAP2B - front G -C
+## PATZ1 - front G - C
+## Zfx - back C - G 
+## TFAP2A - front G - C
+## ZNF454 - mix of front and back G - C
+CMC_MSSM_199_chrX_3733836_T_G_mt
+
+# so for TFAP2C, TFAP2B,  PATZ1, it looks like the other edge of the GGCC*****GGCC are not very formative. Will mutate the other G, to a C since A/T seem to be more informative while C anf G seem equivalent
+
+# SfiI / 
+## PLAG1, 
+## PATZ1
+## Tcf12
+## Zfx
+## ZNF257 - front - G
+## TFAP2A
+## TFAP2C
+CMC_MSSM_199_chrX_3733836_T_G_wt
+
+```
+
+So it appears a good first try will be to add multiple different versions where we mutagenize the RE site at multiple places (particularly at the beginning/ends of the RE sites). However, this means we need to decrease the number of other elements to make space. Will manually make versions that have parts adjusted
+
+
+```{r}
+# manually changed SCZ_variant_validation_fasta_updated to make modified versions
+```
+
