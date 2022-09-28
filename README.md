@@ -17,7 +17,7 @@ More lengthy analysis of random mutagenesis + capture-based Massively parallel r
 - EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_3_Masked_variant_effects.Rmd
 - EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_4_Variant_Annotations_and_effects.Rmd
 
-Design of MPRA constructs for patient variant validation (designing controls as well as python script/jupyter to design the actual probes):
+Design of MPRA constructs for patient variant validation (designing controls as well as python script/jupyter notebook to design the actual probes):
 - EXP_00027_SCZ_Variant_Validation.Rmd
 - FASTA_extraction_functions.R
 - EXP_00027_SCZ_pwmscan_check.sh (database wide TFBS motif scanning - for speed - necessary for checking changing RE sites without impacting potential TF binding sites)
