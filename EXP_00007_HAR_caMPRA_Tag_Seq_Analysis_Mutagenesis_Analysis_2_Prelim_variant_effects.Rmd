@@ -1,0 +1,408 @@
+---
+title: "EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_2_Prelim_variant_effects"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Rationale for Final caMPRA Tag seq analysis
+This analysis is to further polish the analysis based on previous preliminary analyses.
+
+There were issues with the first two analyses - the first, while fine, was performed on 1 lane of sequencing for the tag-seq so it wasn't the complete dataset. The second analysis using dnaclust has issues with consistency. The third analysis was performed using umi_tools, but on randomly shuffled (but pairs maintained) subsets. However, there seemed to a filtering issue with the variants that were called, so this analysis is repeating the mutagenesis analysis with new filtered variants (~90K variants vs ~80K variants)
+
+Note that for the Rmd file, will mainly save figures and visualize plots from file (using knitr::include_graphics to save on memory and make sure the plots are available outside of these the notebook)
+
+# outline of overall analysis
+1. QC of barcodes and filtering
+2. Evaluating the impact of variants on expression (this document)
+3. Improved masked evaluation of variants
+4. Relationship between variant annotations and effect on expression
+
+# load library
+```{r, load library, echo=FALSE}
+library(tidyverse)
+library(ggpubr)
+library(stringdist)
+library(GGally)
+library(tidygenomics)
+library(patchwork)
+library(RVenn)
+library(superheat)
+library(MutationalPatterns)
+ref_genome <- "BSgenome.Hsapiens.UCSC.hg19"
+library(ref_genome, character.only = TRUE)
+library(rstatix)
+library(RColorBrewer)
+library(AnnotationHub)
+library(MafDb.gnomAD.r2.1.hs37d5)
+library(phastCons100way.UCSC.hg19)
+```
+
+```{r, load uploaded and formatted data, eval=FALSE}
+HAR_tag_seq_w_variant_info_pD2_5_rep_only <- read_tsv("../Saved_Data/HAR_tag_seq_w_variant_info_pD2_5_rep_only.txt")
+HAR_tag_seq_w_variant_info_pD3_5_rep_only <- read_tsv("../Saved_Data/HAR_tag_seq_w_variant_info_pD3_5_rep_only.txt")
+
+variant_assigned_barcodes <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Saved_Data/high_mut_post_filter_correction_variants.txt")
+
+HAR_probe_names <- read_tsv("../Saved_Data/HAR_probe_names.txt")
+```
+
+
+##############################################################################################################################
+# Check expression differences due to variants
+
+```{r, TPM normalize data, eval=FALSE}
+HAR_7x_mut_pD2_filtered_barcodes_TPM <- HAR_tag_seq_w_variant_info_pD2_5_rep_only %>%
+  dplyr::select(barcode, HAR_7x_mut_pD2, HAR_7x_mut_pDonor2_rep_1, HAR_7x_mut_pDonor2_rep_2, HAR_7x_mut_pDonor2_rep_3, HAR_7x_mut_pDonor2_rep_4, HAR_7x_mut_pDonor2_rep_5) %>%
+  distinct() %>%
+  pivot_longer(cols = HAR_7x_mut_pD2:HAR_7x_mut_pDonor2_rep_5,
+               names_to = "tag_type",
+               values_to = "read_num") %>%
+  dplyr::group_by(tag_type) %>%
+  dplyr::summarize(total = sum(read_num)) %>%
+  dplyr::mutate(scaling_factor = total/1000000) %>%
+  dplyr::select(-total) %>%
+  pivot_wider(names_from = tag_type,
+              values_from = scaling_factor)
+
+HAR_7x_mut_pD2_filtered_barcodes <- HAR_tag_seq_w_variant_info_pD2_5_rep_only %>%
+  dplyr::select(barcode, probe, HAR_7x_mut_pD2, HAR_7x_mut_pDonor2_rep_1, HAR_7x_mut_pDonor2_rep_2, HAR_7x_mut_pDonor2_rep_3, HAR_7x_mut_pDonor2_rep_4, HAR_7x_mut_pDonor2_rep_5) %>%
+  distinct() %>%
+  dplyr::mutate(HAR_7x_mut_pD2_TPM = HAR_7x_mut_pD2/HAR_7x_mut_pD2_filtered_barcodes_TPM$HAR_7x_mut_pD2,
+                HAR_7x_mut_pD2_cDNA_tag_TPM_1 = HAR_7x_mut_pDonor2_rep_1/HAR_7x_mut_pD2_filtered_barcodes_TPM$HAR_7x_mut_pDonor2_rep_1,
+                HAR_7x_mut_pD2_cDNA_tag_TPM_2 = HAR_7x_mut_pDonor2_rep_2/HAR_7x_mut_pD2_filtered_barcodes_TPM$HAR_7x_mut_pDonor2_rep_2,
+                HAR_7x_mut_pD2_cDNA_tag_TPM_3 = HAR_7x_mut_pDonor2_rep_3/HAR_7x_mut_pD2_filtered_barcodes_TPM$HAR_7x_mut_pDonor2_rep_3,
+                HAR_7x_mut_pD2_cDNA_tag_TPM_4 = HAR_7x_mut_pDonor2_rep_4/HAR_7x_mut_pD2_filtered_barcodes_TPM$HAR_7x_mut_pDonor2_rep_4,
+                HAR_7x_mut_pD2_cDNA_tag_TPM_5 = HAR_7x_mut_pDonor2_rep_5/HAR_7x_mut_pD2_filtered_barcodes_TPM$HAR_7x_mut_pDonor2_rep_5) %>%
+  # calculate DNA/RNA from the TPM normalized numbers
+  dplyr::mutate(HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_1 = log2(HAR_7x_mut_pD2_cDNA_tag_TPM_1/HAR_7x_mut_pD2_TPM),
+                HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_2 = log2(HAR_7x_mut_pD2_cDNA_tag_TPM_2/HAR_7x_mut_pD2_TPM),
+                HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_3 = log2(HAR_7x_mut_pD2_cDNA_tag_TPM_3/HAR_7x_mut_pD2_TPM),
+                HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_4 = log2(HAR_7x_mut_pD2_cDNA_tag_TPM_4/HAR_7x_mut_pD2_TPM),
+                HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_5 = log2(HAR_7x_mut_pD2_cDNA_tag_TPM_5/HAR_7x_mut_pD2_TPM))
+
+write_tsv(HAR_7x_mut_pD2_filtered_barcodes, file = "../Saved_Data/HAR_7x_mut_pD2_filtered_barcodes.txt")
+
+# pD3
+HAR_7x_mut_pD3_filtered_barcodes_TPM <- HAR_tag_seq_w_variant_info_pD3_5_rep_only %>%
+  dplyr::select(barcode, HAR_7x_mut_pD3, HAR_7x_mut_pDonor3_rep_1, HAR_7x_mut_pDonor3_rep_2, HAR_7x_mut_pDonor3_rep_3, HAR_7x_mut_pDonor3_rep_4, HAR_7x_mut_pDonor3_rep_5) %>%
+  distinct() %>%
+  pivot_longer(cols = HAR_7x_mut_pD3:HAR_7x_mut_pDonor3_rep_5,
+               names_to = "tag_type",
+               values_to = "read_num") %>%
+  dplyr::group_by(tag_type) %>%
+  dplyr::summarize(total = sum(read_num)) %>%
+  dplyr::mutate(scaling_factor = total/1000000) %>%
+  dplyr::select(-total) %>%
+  pivot_wider(names_from = tag_type,
+              values_from = scaling_factor)
+
+HAR_7x_mut_pD3_filtered_barcodes <- HAR_tag_seq_w_variant_info_pD3_5_rep_only %>%
+  dplyr::select(barcode, probe, HAR_7x_mut_pD3, HAR_7x_mut_pDonor3_rep_1, HAR_7x_mut_pDonor3_rep_2, HAR_7x_mut_pDonor3_rep_3, HAR_7x_mut_pDonor3_rep_4, HAR_7x_mut_pDonor3_rep_5) %>%
+  distinct() %>%
+  dplyr::mutate(HAR_7x_mut_pD3_TPM = HAR_7x_mut_pD3/HAR_7x_mut_pD3_filtered_barcodes_TPM$HAR_7x_mut_pD3,
+                HAR_7x_mut_pD3_cDNA_tag_TPM_1 = HAR_7x_mut_pDonor3_rep_1/HAR_7x_mut_pD3_filtered_barcodes_TPM$HAR_7x_mut_pDonor3_rep_1,
+                HAR_7x_mut_pD3_cDNA_tag_TPM_2 = HAR_7x_mut_pDonor3_rep_2/HAR_7x_mut_pD3_filtered_barcodes_TPM$HAR_7x_mut_pDonor3_rep_2,
+                HAR_7x_mut_pD3_cDNA_tag_TPM_3 = HAR_7x_mut_pDonor3_rep_3/HAR_7x_mut_pD3_filtered_barcodes_TPM$HAR_7x_mut_pDonor3_rep_3,
+                HAR_7x_mut_pD3_cDNA_tag_TPM_4 = HAR_7x_mut_pDonor3_rep_4/HAR_7x_mut_pD3_filtered_barcodes_TPM$HAR_7x_mut_pDonor3_rep_4,
+                HAR_7x_mut_pD3_cDNA_tag_TPM_5 = HAR_7x_mut_pDonor3_rep_5/HAR_7x_mut_pD3_filtered_barcodes_TPM$HAR_7x_mut_pDonor3_rep_5) %>%
+  # calculate DNA/RNA from the TPM normalized numbers
+  dplyr::mutate(HAR_7x_mut_pD3_cDNA_tag_TPM_norm_log_1 = log2(HAR_7x_mut_pD3_cDNA_tag_TPM_1/HAR_7x_mut_pD3_TPM),
+                HAR_7x_mut_pD3_cDNA_tag_TPM_norm_log_2 = log2(HAR_7x_mut_pD3_cDNA_tag_TPM_2/HAR_7x_mut_pD3_TPM),
+                HAR_7x_mut_pD3_cDNA_tag_TPM_norm_log_3 = log2(HAR_7x_mut_pD3_cDNA_tag_TPM_3/HAR_7x_mut_pD3_TPM),
+                HAR_7x_mut_pD3_cDNA_tag_TPM_norm_log_4 = log2(HAR_7x_mut_pD3_cDNA_tag_TPM_4/HAR_7x_mut_pD3_TPM),
+                HAR_7x_mut_pD3_cDNA_tag_TPM_norm_log_5 = log2(HAR_7x_mut_pD3_cDNA_tag_TPM_5/HAR_7x_mut_pD3_TPM))
+
+write_tsv(HAR_7x_mut_pD3_filtered_barcodes, file = "../Saved_Data/HAR_7x_mut_pD3_filtered_barcodes.txt")
+```
+
+
+```{r, eval=FALSE}
+HAR_mut_7x_pD2_filtered_barcodes_corr <- HAR_7x_mut_pD2_filtered_barcodes %>%
+  select(barcode, HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_1:HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_5) %>%
+  distinct() %>%
+  ggpairs(., columns = 2:6) +
+  theme_pubr() +
+  ggtitle("correlations between HAR 7x mut pD2 cDNA replicates for non-dropouts")
+
+
+HAR_mut_7x_pD3_filtered_barcodes_corr <- HAR_7x_mut_pD3_filtered_barcodes %>%
+  select(barcode, HAR_7x_mut_pD3_cDNA_tag_TPM_norm_log_1:HAR_7x_mut_pD3_cDNA_tag_TPM_norm_log_5) %>%
+  distinct() %>%
+  ggpairs(., columns = 2:6) +
+  theme_pubr() +
+  ggtitle("correlations between HAR 7x mut pD3 cDNA replicates for non-dropouts")
+
+
+ggsave(HAR_mut_7x_pD2_filtered_barcodes_corr, filename = "../figures/Mutagenesis_Analysis/HAR_mut_7x_pD2_filtered_barcodes_corr.png", height = 7, width = 7)
+ggsave(HAR_mut_7x_pD3_filtered_barcodes_corr, filename = "../figures/Mutagenesis_Analysis/HAR_mut_7x_pD3_filtered_barcodes_corr.png", height = 7, width = 7)
+ggsave(HAR_mut_7x_pD2_filtered_barcodes_corr, filename = "../figures/Mutagenesis_Analysis/HAR_mut_7x_pD2_filtered_barcodes_corr.pdf", height = 7, width = 7)
+ggsave(HAR_mut_7x_pD3_filtered_barcodes_corr, filename = "../figures/Mutagenesis_Analysis/HAR_mut_7x_pD3_filtered_barcodes_corr.pdf", height = 7, width = 7)
+
+rm(HAR_mut_7x_pD2_filtered_barcodes_corr)
+rm(HAR_mut_7x_pD3_filtered_barcodes_corr)
+```
+```{r}
+knitr::include_graphics("../figures/Mutagenesis_Analysis/HAR_mut_7x_pD2_filtered_barcodes_corr.png")
+knitr::include_graphics("../figures/Mutagenesis_Analysis/HAR_mut_7x_pD3_filtered_barcodes_corr.png")
+
+```
+
+So it looks like the correlations aren't particularly great, especially for the low expressing regions. While it is a shame that we are seem to be having issues with transfection efficiency, cell number, or day of harvesting, this variability will mainly lead to false negatives rather than false positives which would be a big issue. Also the stronger expressing regions seem to be fairly consistent across replicates. Note that even pD3 didn't help much in terms of increased consistency.
+
+#######################################################################################################################################
+# variant QC / profiling
+Check to see where in the regions and what type of variants are produced in our mutagenesis
+```{r, variant QC and profiling - position, eval=FALSE}
+# overlay variants with probes
+variant_barcode_w_probe_info <- left_join(variant_assigned_barcodes %>%
+                                            dplyr::rename(start_var = start,
+                                                   end_var = end), 
+                                          HAR_probe_names,
+                                          by = c("region" = "probe"))%>%
+  dplyr::mutate(probe_length = abs(end-start),
+                # relative position of the variant in the probe, normalized by length
+                variant_rel_pos = (as.numeric(POS) - start)/probe_length*100,
+                # mark weirdly mapped probes
+                incorrect_mapping = case_when(variant_rel_pos < 0 ~ "incorrect",
+                                              variant_rel_pos > 100 ~ "incorrect",
+                                              TRUE ~ "correct_mapping"))
+  
+write_tsv(variant_barcode_w_probe_info, file = "../Saved_Data/Mutagenesis_Analysis/variant_barcode_w_probe_info.txt")
+
+# visualization of variant distribution
+variant_caMPRA_position_all_plot <- variant_barcode_w_probe_info %>%
+  select(var_id, variant_rel_pos, incorrect_mapping) %>%
+  distinct() %>%
+  dplyr::filter(incorrect_mapping == "correct_mapping") %>%
+  ggplot() +
+  geom_histogram(aes(x = variant_rel_pos)) +
+  theme_pubr()
+
+
+variant_caMPRA_position_unique_plot <- variant_barcode_w_probe_info %>%
+  dplyr::filter(incorrect_mapping == "correct_mapping") %>%
+  dplyr::select(CHROM:var_coord, variant_rel_pos) %>%
+  distinct() %>%
+  ggplot() +
+  geom_histogram(aes(x = variant_rel_pos)) + 
+  theme_pubr()
+  
+variant_caMPRA_position_plots <- variant_caMPRA_position_all_plot + variant_caMPRA_position_unique_plot
+ggsave(variant_caMPRA_position_plots, filename = "../figures/Mutagenesis_Analysis/variant_caMPRA_position_plots.png", height = 3, width = 7)
+ggsave(variant_caMPRA_position_plots, filename = "../figures/Mutagenesis_Analysis/variant_caMPRA_position_plots.pdf", height = 3, width = 7)
+rm(variant_caMPRA_position_plots, variant_caMPRA_position_all_plot, variant_caMPRA_position_unique_plot)
+```
+```{r}
+knitr::include_graphics("../figures/Mutagenesis_Analysis/variant_caMPRA_position_plots.png")
+```
+
+So it looks like we get pretty good distribution of variants throughout the probes with mutagenesis! However, note that we that the number of unique variants us somewhat depleted in the middle of the probes, and that is likely a reflection hiseq2500 read length limitations
+
+
+#######################################################################################################################################
+# Preliminary analysis with caMPRA probe assigned barcodes
+# note that there are some limitations that should be considered
+# 1. the umi_tools split method depletes rare barcodes, which could affect potentially important barcodes (though they tend to be pretty inconsistent so it is better to filter out)
+# 2. the deduplication method picks out the more common region, which works fine for most cases one seems to be a clear lead - however, there can be issues, especially when there are multiple cross overs or the relative amounts of the different regions are similar
+
+```{r, read in variants, eval=FALSE}
+# read in variants as granges
+variant_vcfs <- c("../Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD2.chr.wheader.v4.2.vcf",
+                  "../Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD3.chr.wheader.v4.2.vcf")
+
+vcf_sample_names <- c("pD2",
+                      "pD3")
+
+variant_grl <- read_vcfs_as_granges(vcf_files = variant_vcfs,
+                                    sample_names = vcf_sample_names,
+                                    genome = ref_genome,
+                                    predefined_dbs_mbs = TRUE)
+
+# mutational signal analysis 
+type_occurrences <- mut_type_occurrences(variant_grl, ref_genome)
+
+mut_type <- plot_spectrum(type_occurrences, by = vcf_sample_names, error_bars = 'none')
+
+mut_mat <- mut_matrix(vcf_list = variant_grl, ref_genome = ref_genome)
+mut_signature <- plot_96_profile(mut_mat)
+ggsave(mut_type, filename = "../figures/Mutagenesis_Analysis/mut_type.pdf")
+ggsave(mut_type, filename = "../figures/Mutagenesis_Analysis/mut_type.png")
+ggsave(mut_signature, filename = "../figures/Mutagenesis_Analysis/mut_signature.png", width = 6, height = 4)
+ggsave(mut_signature, filename = "../figures/Mutagenesis_Analysis/mut_signature.pdf", width = 6, height = 4)
+```
+```{r}
+knitr::include_graphics("../figures/Mutagenesis_Analysis/mut_type.png")
+knitr::include_graphics("../figures/Mutagenesis_Analysis/mut_signature.png")
+```
+The mutational signature matches that of the mutazyme II enzyme used to introduce the random mutations
+
+```{r, annotate with gnomad information, eval=FALSE}
+# annotate with gnomad allele frequency information
+variant_gnomad_2.1_maf_pD2 <- gscores(x = MafDb.gnomAD.r2.1.hs37d5,
+                                  ranges = variant_grl$pD2) %>%
+  as_tibble() %>%
+  dplyr::mutate(ALT = unlist(as(ALT, "CharacterList"))) %>%
+  dplyr::mutate(AF = case_when(is.na(AF) ~ 0,
+                               TRUE ~ AF))
+  
+
+variant_gnomad_2.1_maf_pD3 <- gscores(x = MafDb.gnomAD.r2.1.hs37d5,
+                                  ranges = variant_grl$pD3) %>%
+  as_tibble() %>%
+  dplyr::mutate(ALT = unlist(as(ALT, "CharacterList"))) %>%
+  dplyr::mutate(AF = case_when(is.na(AF) ~ 0,
+                               TRUE ~ AF))
+
+# combined variant AF information
+variant_gnomad_2.1_maf <- bind_rows(variant_gnomad_2.1_maf_pD2,
+                                    variant_gnomad_2.1_maf_pD3) %>%
+  distinct()
+
+write_tsv(variant_gnomad_2.1_maf, file = "../Saved_Data/variant_gnomad_2.1_maf.txt")
+
+# add AF information to barcodes
+variant_assigned_barcodes_AF <- variant_assigned_barcodes %>%
+  left_join(x = .,
+            y = variant_gnomad_2.1_maf,
+            by = c("CHROM" = "seqnames",
+                   "POS" = "start",
+                   "REF" = "REF",
+                   "ALT" = "ALT")) %>%
+  # variants with no AF information are the ones that were filtered out before
+  dplyr::filter(!is.na(AF))
+
+write_tsv(variant_assigned_barcodes_AF, file = "../Saved_Data/variant_assigned_barcodes_AF.txt")
+```
+
+
+```{r, eval=FALSE}
+#  old code used to annotate using R - not the most efficient way (though convenient), due to speed and memory issues
+# # add conservation scores - works for phastcons, but not for phylop due memory issues (and takes ages even if memory is sufficient) - use vcfanno
+# ah <- AnnotationHub()
+# 
+# #
+# phast_100 <- getGScores("phastCons100way.UCSC.hg19")
+# 
+# variant_phastcons100_pD2 <- gscores(x = phast_100,
+#                                   ranges = variant_grl$pD2) %>%
+#   as_tibble() %>%
+#   dplyr::mutate(ALT = unlist(as(ALT, "CharacterList"))) %>%
+#   dplyr::rename(phastcons100 = default)
+# 
+# 
+# variant_phastcons100_pD3 <- gscores(x = phast_100,
+#                                   ranges = variant_grl$pD3) %>%
+#   as_tibble() %>%
+#   dplyr::mutate(ALT = unlist(as(ALT, "CharacterList"))) %>%
+#   dplyr::rename(phastcons100 = default)
+
+
+# # phyloP - takes too much memory - use vcfanno instead
+# variant_phylop100_pD2 <- gscores(x = phylop_100,
+#                                   ranges = variant_grl$pD2) %>%
+#   as_tibble() #%>%
+#   dplyr::mutate(ALT = unlist(as(ALT, "CharacterList"))) %>%
+#   dplyr::rename(phastcons100 = default)
+#   
+# 
+# variant_phylop100_pD3 <- gscores(x = phylop_100,
+#                                   ranges = variant_grl$pD3) %>%
+#   as_tibble() %>%
+#   dplyr::mutate(ALT = unlist(as(ALT, "CharacterList"))) %>%
+#   dplyr::rename(phastcons100 = default)
+# 
+# combined variant AF information
+# variant_phastcons100 <- bind_rows(variant_phastcons100_pD2,
+#                                     variant_phastcons100_pD3) %>%
+#   dplyr::mutate(chr = str_replace(seqnames, "chr", "")) %>%
+#   dplyr::select(chr, start, REF, ALT, phastcons100) %>%
+#   distinct()
+# 
+# write_tsv(variant_phastcons100, file = "../Saved_Data/variant_phastcons100.txt)"
+# # add AF information to barcodes
+# variant_assigned_barcodes_AF_phastcons100 <- variant_assigned_barcodes_AF %>%
+#   left_join(x = .,
+#             y = variant_phastcons100,
+#             by = c("CHROM" = "chr",
+#                    "POS" = "start",
+#                    "REF" = "REF",
+#                    "ALT" = "ALT"))
+```
+
+
+```{r, create a distribution baseline expression profiles for each HAR pD2, eval=FALSE}
+HAR_tag_seq_barcodes_wo_variants_pD2 <- HAR_7x_mut_pD2_filtered_barcodes %>%
+  filter(!barcode %in% unique(variant_assigned_barcodes_AF$barcode)) %>%
+  select(HAR_7x_mut_pD2_TPM, 
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_1,
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_2,
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_3,
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_4,
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_5,
+         probe) %>%
+  dplyr::rename(
+         HAR_7x_mut.pDonor2.rep_1 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_1,
+         HAR_7x_mut.pDonor2.rep_2 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_2,
+         HAR_7x_mut.pDonor2.rep_3 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_3,
+         HAR_7x_mut.pDonor2.rep_4 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_4,
+         HAR_7x_mut.pDonor2.rep_5 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_5
+         ) %>%
+  pivot_longer(-c(HAR_7x_mut_pD2_TPM, probe), names_to = "condition", values_to = "expression") %>%
+  separate(col = condition, sep = "\\.", into = c("mut_condition", "promoter", "rep"))
+
+write_tsv(HAR_tag_seq_barcodes_wo_variants_pD2, file = "../Saved_Data/HAR_tag_seq_barcodes_wo_variants_pD2.txt")
+
+# updated to use rstatix for stats (better record keeping for numbers analyzed)
+HAR_tag_seq_barcodes_wo_variants_pD2_stats <- HAR_tag_seq_barcodes_wo_variants_pD2 %>% 
+  group_by(probe) %>%
+  rstatix::get_summary_stats(expression)
+
+# number of unique probes: 1867 
+length(unique(HAR_tag_seq_barcodes_wo_variants_pD2$probe))
+  
+write_tsv(HAR_tag_seq_barcodes_wo_variants_pD2_stats, file = "../Saved_Data/HAR_tag_seq_barcodes_wo_variants_pD2_stats.txt")
+```
+
+There are 1867 unique probes that do not have variants. There are represented by different numbers of barcodes
+
+
+```{r, pD2 with variants analysis, eval=FALSE}
+HAR_tag_seq_barcodes_w_variants_pD2 <- HAR_7x_mut_pD2_filtered_barcodes %>%
+  filter(barcode %in% unique(variant_assigned_barcodes_AF$barcode)) %>%
+  select(HAR_7x_mut_pD2_TPM, 
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_1,
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_2,
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_3,
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_4,
+         HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_5,
+         probe,
+         barcode) %>%
+  dplyr::rename(
+         HAR_7x_mut.pDonor2.rep_1 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_1,
+         HAR_7x_mut.pDonor2.rep_2 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_2,
+         HAR_7x_mut.pDonor2.rep_3 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_3,
+         HAR_7x_mut.pDonor2.rep_4 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_4,
+         HAR_7x_mut.pDonor2.rep_5 = HAR_7x_mut_pD2_cDNA_tag_TPM_norm_log_5
+         ) %>%
+  pivot_longer(-c(HAR_7x_mut_pD2_TPM, probe, barcode), names_to = "condition", values_to = "expression") %>%
+  separate(col = condition, sep = "\\.", into = c("mut_condition", "promoter", "rep"))
+
+write_tsv(HAR_tag_seq_barcodes_w_variants_pD2, file = "../Saved_Data/HAR_tag_seq_barcodes_w_variants_pD2.txt")
+
+HAR_tag_seq_barcodes_w_variants_pD2_stats <- HAR_tag_seq_barcodes_w_variants_pD2 %>% 
+  group_by(probe, barcode) %>%
+  get_summary_stats(expression)
+
+# number of probes that have any variant in them: 1474
+length(unique(HAR_tag_seq_barcodes_w_variants_pD2$probe))
+
+# overlap with non-variant containing elements: 869
+sum(unique(HAR_tag_seq_barcodes_w_variants_pD2$probe) %in% unique(HAR_tag_seq_barcodes_wo_variants_pD2$probe))
+
+write_tsv(HAR_tag_seq_barcodes_w_variants_pD2_stats, file = "../Saved_Data/HAR_tag_seq_barcodes_w_variants_pD2_stats.txt")
+```
+
+There are 4591 mutagenize probes that are well represented, derived from 1474/10665 different probes. So we were only able to impact ~13% of the probes in the pool.
+
+However, when we overlap of the probes with/without barcodes, we see that only 869/1474 overlap. While this might be because of drop off, it could be that some of the regions with variants are actually regions with common variants that were present in the captured sample. We can see if that is the case and rebalance them if needed

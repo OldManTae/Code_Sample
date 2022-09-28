@@ -1,0 +1,684 @@
+---
+title: "EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_1_QC_and_filtering"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+---
+
+# Rationale for Final caMPRA Tag seq analysis
+This analysis is to further polish the analysis based on previous preliminary analyses.
+
+There were issues with the first two analyses - the first, while fine, was performed on 1 lane of sequencing for the tag-seq so it wasn't the complete dataset. The second analysis using dnaclust has issues with consistency. The third analysis was performed using umi_tools, but on randomly shuffled (but pairs maintained) subsets. However, there seemed to a filtering issue with the variants that were called, so this analysis is repeating the mutagenesis analysis with new filtered variants (~90K variants vs ~80K variants)
+
+Note that for the Rmd file, will mainly save figures and visualize plots from file (using knitr::include_graphics to save on memory and make sure the plots are available outside of these the notebook). For the purposes of the final knit to include graphics, chunks will be set to eval=FALSE to prevent running very time consuming chunks
+
+# outline of overall analysis
+1. QC of barcodes and filtering (this document)
+2. Evaluating the impact of variants on expression
+3. Improved masked evaluation of variants
+4. Relationship between variant annotations and effect on expression
+
+# load library
+```{r, load library, echo=FALSE}
+library(tidyverse)
+library(ggpubr)
+library(stringdist)
+library(GGally)
+library(tidygenomics)
+library(patchwork)
+library(RVenn)
+library(superheat)
+library(MutationalPatterns)
+ref_genome <- "BSgenome.Hsapiens.UCSC.hg19"
+library(ref_genome, character.only = TRUE)
+library(rstatix)
+library(RColorBrewer)
+library(AnnotationHub)
+library(MafDb.gnomAD.r2.1.hs37d5)
+library(phastCons100way.UCSC.hg19)
+```
+
+For the tag seq analysis, there are 14 samples
+- 10 sample HAR 20ng 7x Mut cDNA tag-seq (total DNA = 363)
+- 4 sample HAR 20ng/40ng/80ng 7/5/3x Mut plasmid tag-seq (total DNA = 5.7*20 = 114ng?)
+
+# Import data: clustered barcodes (plasmid tag seq)
+```{r, import tag seq barcord data clustered, eval=FALSE, tidy=TRUE}
+# remember to remove 10N barcodes
+# Plasmid Tag Seq
+HAR_20ng_7x_mut_pDonor2_clustered_Barcodes <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pDonor-2-dilute.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pD2")
+HAR_20ng_7x_mut_pDonor3_clustered_Barcodes <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pDonor-3-dilute.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pD3")
+HAR_40ng_5x_mut_pDonor2_clustered_Barcodes <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-40ng-5x-Mut-pDonor-2-dilute.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_5x_mut_pD2")
+HAR_40ng_5x_mut_pDonor3_clustered_Barcodes <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-40ng-5x-Mut-pDonor-3-dilute.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_5x_mut_pD3")
+
+# combine barcodes from all replicates together
+HAR_Plasmid_Tag_Seq_clustered_barcodes <- bind_rows(HAR_20ng_7x_mut_pDonor2_clustered_Barcodes, HAR_20ng_7x_mut_pDonor3_clustered_Barcodes, HAR_40ng_5x_mut_pDonor2_clustered_Barcodes, HAR_40ng_5x_mut_pDonor3_clustered_Barcodes)
+
+rm(HAR_20ng_7x_mut_pDonor2_clustered_Barcodes,
+   HAR_20ng_7x_mut_pDonor3_clustered_Barcodes,
+   HAR_40ng_5x_mut_pDonor2_clustered_Barcodes,
+   HAR_40ng_5x_mut_pDonor3_clustered_Barcodes)
+
+# save combined barcodes
+saveRDS(HAR_Plasmid_Tag_Seq_clustered_barcodes, file = "../Saved_Data/Mutagenesis_Analysis/HAR_Plasmid_Tag_Seq_clustered_barcodes.RDS")
+```
+
+
+```{r, table clustered data counts, eval=FALSE, tidy=TRUE}
+# remove 10N barcodes
+HAR_Plasmid_Tag_Seq_clustered_barcodes_barcode_counts <- HAR_Plasmid_Tag_Seq_clustered_barcodes %>%
+  dplyr::filter(str_length(barcode) == 25) %>%
+  dplyr::group_by(sample) %>%
+  dplyr::summarise(unique_barcode_count = n(),
+                   combined_barcode_number = sum(count))
+
+# save combined barcode counts
+saveRDS(HAR_Plasmid_Tag_Seq_clustered_barcodes_barcode_counts, file = "Saved_Data/Mutagenesis_Analysis/HAR_Plasmid_Tag_Seq_clustered_barcodes_barcode_counts.RDS")
+```
+
+```{r}
+# read in tables
+knitr::kable(read_rds("../Saved_Data/Mutagenesis_Analysis/HAR_Plasmid_Tag_Seq_clustered_barcodes_barcode_counts.RDS"), format = "html")
+```
+
+
+It appears that the number of unique barcodes have decreased 2-3x, while the raw barcodes decreased by a little bit (unclear why some of the raw barcodes have gone)
+
+```{r, import mRNA tag seq barcode data clustered, eval=FALSE, tidy=TRUE}
+# mRNA Tag Seq
+# HAR 7x Mut p2
+HAR_20ng_7x_mut_pDonor2_clustered_rep_1 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD2-cDNA-Luc-SfiI-amp-1.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor2_rep_1")
+HAR_20ng_7x_mut_pDonor2_clustered_rep_2 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD2-cDNA-Luc-SfiI-amp-2.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor2_rep_2")
+HAR_20ng_7x_mut_pDonor2_clustered_rep_3 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD2-cDNA-Luc-SfiI-amp-3.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor2_rep_3")
+HAR_20ng_7x_mut_pDonor2_clustered_rep_4 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD2-cDNA-Luc-SfiI-amp-4.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor2_rep_4")
+HAR_20ng_7x_mut_pDonor2_clustered_rep_5 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD2-cDNA-Luc-SfiI-amp-5.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor2_rep_5")
+
+# HAR 7x Mut p3
+HAR_20ng_7x_mut_pDonor3_clustered_rep_1 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD3-cDNA-Luc-SfiI-amp-1.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor3_rep_1") 
+HAR_20ng_7x_mut_pDonor3_clustered_rep_2 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD3-cDNA-Luc-SfiI-amp-2.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor3_rep_2")
+HAR_20ng_7x_mut_pDonor3_clustered_rep_3 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD3-cDNA-Luc-SfiI-amp-3.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor3_rep_3") 
+HAR_20ng_7x_mut_pDonor3_clustered_rep_4 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD3-cDNA-Luc-SfiI-amp-4.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor3_rep_4")
+HAR_20ng_7x_mut_pDonor3_clustered_rep_5 <- read_tsv("/Users/wertyfree/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/clustered_multiplexed_umi-tools/HAR-20ng-7x-Mut-pD3-cDNA-Luc-SfiI-amp-5.barcode_counts.txt") %>%
+  dplyr::mutate(sample = "HAR_7x_mut_pDonor3_rep_5")
+
+
+# combine replicates from pDonor2 and pDonor3
+HAR_mRNA_Tag_Seq_clustered_barcodes <- bind_rows(HAR_20ng_7x_mut_pDonor2_clustered_rep_1, 
+                                           HAR_20ng_7x_mut_pDonor2_clustered_rep_2, 
+                                           HAR_20ng_7x_mut_pDonor2_clustered_rep_3, 
+                                           HAR_20ng_7x_mut_pDonor2_clustered_rep_4, 
+                                           HAR_20ng_7x_mut_pDonor2_clustered_rep_5,
+                                           HAR_20ng_7x_mut_pDonor3_clustered_rep_1,
+                                           HAR_20ng_7x_mut_pDonor3_clustered_rep_2,
+                                           HAR_20ng_7x_mut_pDonor3_clustered_rep_3,
+                                           HAR_20ng_7x_mut_pDonor3_clustered_rep_4,
+                                           HAR_20ng_7x_mut_pDonor3_clustered_rep_5)
+
+rm(HAR_20ng_7x_mut_pDonor2_clustered_rep_1, 
+   HAR_20ng_7x_mut_pDonor2_clustered_rep_2, 
+   HAR_20ng_7x_mut_pDonor2_clustered_rep_3, 
+   HAR_20ng_7x_mut_pDonor2_clustered_rep_4, 
+   HAR_20ng_7x_mut_pDonor2_clustered_rep_5,
+   HAR_20ng_7x_mut_pDonor3_clustered_rep_1,
+   HAR_20ng_7x_mut_pDonor3_clustered_rep_2,
+   HAR_20ng_7x_mut_pDonor3_clustered_rep_3,
+   HAR_20ng_7x_mut_pDonor3_clustered_rep_4,
+   HAR_20ng_7x_mut_pDonor3_clustered_rep_5)
+
+# saved combined mRNA barcodes
+saveRDS(HAR_mRNA_Tag_Seq_clustered_barcodes, file = "../Saved_Data/Mutagenesis_Analysis/HAR_mRNA_Tag_Seq_clustered_barcodes.RDS")
+```
+
+
+```{r, table clustered data counts 2, eval=FALSE, tidy=TRUE}
+# count the number of barcodes (length of 25) in each of the samples
+HAR_mRNA_Tag_Seq_clustered_barcode_counts <- HAR_mRNA_Tag_Seq_clustered_barcodes %>%
+  dplyr::filter(str_length(barcode) == 25) %>%
+  dplyr::group_by(sample) %>%
+  dplyr::summarise(unique_barcode_count = n(),
+                   combined_barcode_number = sum(count))
+saveRDS(HAR_mRNA_Tag_Seq_clustered_barcode_counts, file = "../Saved_Data/Mutagenesis_Analysis/HAR_mRNA_Tag_Seq_clustered_barcode_counts.RDS")
+
+```
+```{r}
+knitr::kable(readRDS("../Saved_Data/Mutagenesis_Analysis/HAR_mRNA_Tag_Seq_clustered_barcode_counts.RDS"), format = "html")
+```
+Again, comparing dnaclust to umi_tools, it appears that there there is 2-3x decrease in the number of unique barcodes for umi_tools. The number of total barcodes is ~1% lower, the reason for which is somewhat unclear. However, it looks like the dnaclust method does not cluster quite as much as the umi_tools method
+
+```{r, join all clustered barcode data, eval=FALSE, tidy=TRUE}
+# combine plasmid barcodes with mRNA/cDNA barcodes
+HAR_all_Tag_Seq_clustered_barcodes <- bind_rows(HAR_Plasmid_Tag_Seq_clustered_barcodes, HAR_mRNA_Tag_Seq_clustered_barcodes)
+rm(HAR_Plasmid_Tag_Seq_clustered_barcodes, HAR_mRNA_Tag_Seq_clustered_barcodes)
+saveRDS(HAR_all_Tag_Seq_clustered_barcodes, file = "../Saved_Data/Mutagenesis_Analysis/HAR_all_Tag_Seq_clustered_barcodes.RDS")
+```
+
+
+```{r, load uploaded and formatted data, eval=FALSE, tidy=TRUE}
+# used to load data upon resuming analysis (if prior steps were already processed)
+HAR_all_Tag_Seq_clustered_barcodes <- readRDS("../Saved_Data/Mutagenesis_Analysis/HAR_all_Tag_Seq_clustered_barcodes.RDS")
+```
+
+###############################################################################################################################################
+# QC of barcodes
+This section is to QC the barcodes from the tag seq experiment
+```{r, visualization size distributions, eval=FALSE, tidy=TRUE}
+# see the distribution of the number of barcodes
+HAR_all_Tag_Seq_clustered_barcodes_size_plot <- HAR_all_Tag_Seq_clustered_barcodes %>%
+  ggplot(.) +
+  geom_histogram(aes(x = log10(count + 1), fill = sample)) +
+  facet_wrap(~sample, scales = "free") +
+  theme_pubr()
+
+ggsave("../figures/Mutagenesis_Analysis/HAR_all_Tag_Seq_clustered_barcodes_size_plot.png", plot = HAR_all_Tag_Seq_clustered_barcodes_size_plot, height = 8, width = 10)
+rm(HAR_all_Tag_Seq_clustered_barcodes_size_plot)
+```
+```{r}
+knitr::include_graphics("../figures/Mutagenesis_Analysis/HAR_all_Tag_Seq_clustered_barcodes_size_plot.png")
+knitr::include_graphics("../figures/HAR_all_Tag_Seq_clustered_barcodes_size_plot.png")
+```
+
+So it appears that even with clustering, the vast majority of barcodes in the samples are lowly expressed. Will need to keep this in mind when performing intersections. Need to check how many barcodes we see with HiSeq2500 (variant to barcode association)
+
+Also note that the umi_tools seems to have less barcodes that are lowly expressed (less than 10) - this is expected as the main file was split into 10 subsets, so lowly expressed tagseq transcripts is expected to be depleted (or left at 10)
+
+Another aspect is that that we see this skewed distribution in the plasmid tag seq phase. This suggests that we might be having issues with complexity or that barcode complexity is difficult to overcome during the clustering phase because of the 25N nature of the barcodes.
+
+Note that the lowly expressed barcodes are like unused cell barcodes in drop-seq. They might be real, but are not really expanded that much during pMPRA1 maxiprep. They are not reliable for analysis as they will be way underrepresented individually (and we already know that dropout of low abundance barcodes are very problematic (and adds a lot of noise even if present in all replicates)). It would be best to remove these barcodes.
+
+```{r, pivot data, eval=FALSE, tidy=TRUE}
+HAR_all_Tag_Seq_processed_barcodes_pivot <- HAR_all_Tag_Seq_clustered_barcodes %>%
+  dplyr::filter(str_length(barcode) == 25) %>%
+  pivot_wider(names_from = sample, values_from = count, values_fill = list(count = 0))
+rm(HAR_all_Tag_Seq_clustered_barcodes)
+```
+
+From a quick look, it appears that the clustering worked very well! Good consistency
+
+Note that some barcodes which were low are messed up, so rare barcodes in plasmid that ends up being highly expressed in mRNA can have issues
+
+However, one thing to note is that pD2 and pD3 seem to have quite different barcodes despite being from the same original mutagenesis pool. Keep this in mind as it suggests there might be a significant complexity and distribution issue with the pool that adds additional challenges in analysis.
+
+```{r, custom function for deduplication, eval=FALSE, tidy=TRUE}
+# this deduplication function arranges barcodes by their abundance, and the deduplicates by choosing the more abundant one in cases of clashes. This is to deal with many cases of barcodes being very abundant in one region, but appearing again as a super rare barcode in another (possibly due to template switching or other issues)
+deduplicate_barcodes <- function(df){
+  df_distinct_1 <- df %>%
+    dplyr::filter(barcode %in% .$barcode[duplicated(.$barcode)]) %>%
+    dplyr::group_by(barcode, count) %>%
+    dplyr::arrange(desc(count)) %>%
+    dplyr::ungroup() %>% 
+    distinct(., barcode, .keep_all = TRUE)
+
+  df_distinct_2 <- df %>%
+    dplyr::filter(!(barcode %in% .$barcode[duplicated(.$barcode)]))
+
+  df_distinct <- bind_rows(df_distinct_1, df_distinct_2)
+  return(df_distinct)
+}
+```
+
+
+# Compare to barcodes that have been associated with a specific probe
+```{r, compare barcodes to assigned probes, eval=FALSE, tidy=TRUE}
+# note that a form of deduplication was performed to decrease the number of cross over barcodes (most of these barcodes have a primary region with a very rare secondary region) - 09/12/22 clarification - these barcode counts are for pMPRA1 where we perform tag seq for the entire capture, rather than the DNA and cDNA counts from the pD2/pD3 tag seq
+HAR_7x_Mut_assigned_barcodes <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/Mutagenesis_Variant_Calling/HAR-20ng-7x-Mut_capture_w_barcode_merged.grouped.barcodes_counts.txt", col_names = c("probe", "barcode", "count")) %>%
+  deduplicate_barcodes()
+
+HAR_all_Tag_Seq_processed_barcodes_assigned <- full_join(HAR_all_Tag_Seq_processed_barcodes_pivot, HAR_7x_Mut_assigned_barcodes, by = c("barcode" = "barcode")) %>%
+  dplyr::select(-HAR_5x_mut_pD2, -HAR_5x_mut_pD3)
+
+#saveRDS(HAR_all_Tag_Seq_processed_barcodes_assigned, file = "Saved_Data/Mutagenesis_Analysis/HAR_all_Tag_Seq_processed_barcodes_assigned.RDS")
+
+# visualize to see precloning distribution per probe
+HAR_7x_Mut_assigned_barcodes_per_probe_dist_plot <- HAR_7x_Mut_assigned_barcodes %>%
+  dplyr::group_by(probe) %>%
+  dplyr::summarise(unique_barcodes = n(),
+                   total_barcodes = sum(count),
+                   norm_barcodes = total_barcodes/unique_barcodes) %>%
+  ggplot() +
+  geom_histogram(aes(x = log10(norm_barcodes+1)))
+
+HAR_7x_Mut_assigned_barcodes_barcode_num_plot <- HAR_7x_Mut_assigned_barcodes %>%
+  ggplot() +
+  geom_histogram(aes(x = log10(count + 1)))
+
+HAR_7x_Mut_assigned_barcodes_summary_plot <- HAR_7x_Mut_assigned_barcodes_barcode_num_plot + HAR_7x_Mut_assigned_barcodes_per_probe_dist_plot
+
+ggsave(plot = HAR_7x_Mut_assigned_barcodes_summary_plot, filename = "../figures/Mutagenesis_Analysis/HAR_7x_Mut_assigned_barcodes_summary_plot.png", height = 4, width = 8)
+rm(HAR_7x_Mut_assigned_barcodes_per_probe_dist_plot, HAR_7x_Mut_assigned_barcodes_barcode_num_plot, HAR_7x_Mut_assigned_barcodes_summary_plot)
+```
+```{r}
+knitr::include_graphics("../figures/Mutagenesis_Analysis/HAR_7x_Mut_assigned_barcodes_summary_plot.png")
+```
+
+So it appears that at least in terms of distribution, the assigned barcodes are bimodal. This would suggests that the barcodes are not evenly distributed, but it would also suggest that at least the more prevalent barcodes should have made it through to the final transfection constructs, and therefore represented. One potential assumption that can be applied is that if we see a prominent barcode from the assignment, but we do not find an exact match in the plasmid tag seq, it could be that there are mismatches between the assigned barcode vs the tagseq barcode. Convergence is not guaranteed across samples, though the directional method at least performs pretty well across replicates
+
+In order to determine whether this bias is unique to the 25N, it would be good to look at 10N barcodes as well to determine whether we see diversity maintained. For a quick check, unclustered raw barcodes would be inspected and compared with the 10N designed for each HAR probe
+
+```{r, 10N check for HAR coverage, eval=FALSE, tidy=TRUE}
+HAR_7x_mut_10N_raw_barcodes_hiseq2500 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/clustered_tag_seq_barcodes/raw_barcodes/HAR-20ng-7x-Mut_capture_w_barcode_merged_R1.10N.raw_barcode.txt", col_names = c("barcode", "count"))
+
+HAR_caMPRA_design <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/MIP stuff/Order Files/HAR_V2_MIP_MPRA_All_Picked_MIPs.txt",
+                              col_types = cols(
+  `>mip_key` = col_character(),
+  logistic_score = col_double(),
+  chr = col_character(),
+  ext_probe_start = col_double(),
+  ext_probe_stop = col_double(),
+  ext_probe_copy = col_double(),
+  ext_probe_sequence = col_character(),
+  lig_probe_start = col_double(),
+  lig_probe_stop = col_double(),
+  lig_probe_copy = col_double(),
+  lig_probe_sequence = col_character(),
+  mip_scan_start_position = col_double(),
+  mip_scan_stop_position = col_double(),
+  scan_target_sequence = col_character(),
+  mip_sequence = col_character(),
+  feature_start_position = col_double(),
+  feature_stop_position = col_double(),
+  probe_strand = col_character(),
+  failure_flags = col_double(),
+  mip_name = col_character(),
+  Extension = col_character(),
+  Ligation = col_character(),
+  RE_site1 = col_character(),
+  RE_site2 = col_character(),
+  Backbone1 = col_character(),
+  Backbone2 = col_character(),
+  Barcode = col_character(),
+  Complete_MIP_New = col_character(),
+  Length_Pre_Rand = col_double(),
+  Random_Seq = col_character(),
+  MIPs_with_Rand = col_character(),
+  Length_with_Rand = col_double(),
+  MIPs_AG_Content = col_double(),
+  reverse_comp = col_character(),
+  reverse_comp_length = col_double(),
+  Rev_MIPs_AG_Content = col_double(),
+  AG_Based_Picked_MIPs = col_character()
+)) %>%
+  dplyr::select(Barcode, `>mip_key`) %>%
+  dplyr::rename(probe = `>mip_key`) %>%
+  separate(col = probe, into = c("chr", "start_end", "delete_1", "strand"), sep = "\\:|\\/") %>%
+  separate(col = start_end, into = c("start", "end"), sep = "\\-") %>%
+  dplyr::select(-delete_1, -strand) %>%
+  dplyr::mutate(start = as.numeric(start),
+                end = as.numeric(end))
+
+HAR_probe_names <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Data/caMPRA_Features/HAR_Features.txt",
+                            col_types = "ccddc") %>%
+  dplyr::rename(chr = Chr, start = Start, end = End, probe = GeneID) %>%
+  dplyr::select(-Strand) %>%
+  dplyr::mutate(start = as.numeric(start),
+                end = as.numeric(end))
+
+write_tsv(HAR_probe_names, file = "../Saved_Data/HAR_probe_names.txt")
+
+# combine HAR designation and probe name
+HAR_designed_barcode_probe_list <- full_join(HAR_caMPRA_design, HAR_probe_names, by = c("chr" = "chr", "start" = "start", "end" = "end"))
+  
+# intersect barcodes from hiseq2500 run with their designed barcode-probe list counter part
+HAR_7x_mut_10N_raw_barcodes_w_designed_probes <- full_join(HAR_7x_mut_10N_raw_barcodes_hiseq2500, HAR_designed_barcode_probe_list, by = c("barcode" = "Barcode"))
+
+# there appears to be a very poor match between the raw and designed barcodes for 10N. Try to look at reverse complement
+HAR_designed_barcode_probe_list_reverse_comp <- HAR_designed_barcode_probe_list %>%
+  rowwise() %>%
+  dplyr::mutate(reverse_comp_barcode = as.character(reverseComplement(DNAString(Barcode))))
+
+# try to match by reverse complement - works!
+HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp <- full_join(HAR_7x_mut_10N_raw_barcodes_hiseq2500, HAR_designed_barcode_probe_list_reverse_comp, by = c("barcode" = "reverse_comp_barcode"))
+
+
+# # given poor matches, try to calculate hammingdistance between barcodes to correctly assign
+# # dist 2 (might be too much) - note that this is old code used prior to realizing it was the reverse complement
+# assigned_barcodes_to_design_dist_2 <- amatch(HAR_7x_mut_10N_raw_barcodes_hiseq2500$barcode,HAR_designed_barcode_probe_list$Barcode, maxDist = 2)
+# 
+# assigned_barcodes_to_design_dist_1 <- amatch(HAR_7x_mut_10N_raw_barcodes_hiseq2500$barcode,HAR_designed_barcode_probe_list$Barcode, maxDist = 1)
+# 
+# HAR_7x_mut_10N_raw_barcodes_hiseq2500_w_design_dist_2 <- bind_cols(HAR_7x_mut_10N_raw_barcodes_hiseq2500,
+#                                                             HAR_designed_barcode_probe_list[assigned_barcodes_to_design_dist_2,])
+# 
+# HAR_7x_mut_10N_raw_barcodes_hiseq2500_w_design_dist_1 <- bind_cols(HAR_7x_mut_10N_raw_barcodes_hiseq2500,
+#                                                             HAR_designed_barcode_probe_list[assigned_barcodes_to_design_dist_1,])
+# # 9944
+# length(unique(HAR_7x_mut_10N_raw_barcodes_hiseq2500_w_design_dist_2$probe))
+# # 9507
+# length(unique(HAR_7x_mut_10N_raw_barcodes_hiseq2500_w_design_dist_1$probe))
+
+# try to see how many probes are actually represented in in the 10N dataset
+HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp_counts <- HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp %>%
+  group_by(probe) %>%
+  summarize(count = sum(count, na.rm = TRUE))
+
+# plot the number of 10N  barcodes
+HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp_counts_plot <- HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp_counts %>%
+  ggplot() +
+  geom_histogram(aes(x = log10(count + 1)))
+
+ggsave(HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp_counts_plot, filename = "../figures/Mutagenesis_Analysis/HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp_counts_plot.png")
+
+HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp_total_counts <- HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp_counts %>%
+  dplyr::filter(!is.na(probe)) %>%
+  dplyr::mutate(present = (count > 0)) %>%
+  group_by(present) %>%
+  summarize(total = n())
+```
+```{r}
+knitr::include_graphics("../figures/Mutagenesis_Analysis/HAR_7x_mut_10N_raw_barcodes_w_designed_probes_reverse_comp_counts_plot.png")
+```
+
+Old note (see 09/11/21 update)
+
+it appears that many of the top expressed barcodes are not matched at dist 2 - this is interesting given that 2 dist seems like a fairly high error rate, but perhaps the error occurred very early on, like in MIP preparation (with the many rounds of amplification), followed by the enrichment amplification. However, this matching suggests that:
+1. there are likely a lot more probe diversity in 10Ns than would be assumed from the 10N data alone - so at least a chunk of the loss seems to be due to the barcoding process
+2. It might be possible improve match rates across different different tag seq and barcode matches by allowing for some mismatches. The fact that there are relatively abundant barcodes in the hiseq 2500 run (HAR+pMPRA1), but are not represented at all in plasmid tag seq is confusing. While this can happen by chance, it could also be due to mismatching issues (especially if the more dominant plasmid tag seq barcodes do not match to anything)
+
+^ 
+
+09/11/21 Update
+Turns out it was just a reverse complement issue
+
+When we look at the number of probes that are represented in the 10N portion of the Hiseq2500 run, it looks only half (~5929) are found. This suggests that a lot of regions were lost very early on. One potential reason is that the coverage is low (there are quite a few probes at 1 count), which might increase with coverage. Another reason might be that the low cycle number PCR might not be great (7x might be too low). Finally, it could be an issue with the number the mutagenization process, since it appeared to have more issues with cycle number. For future iterations, would highly recommend against using very long barcodes and having the priming site so deep side the construct.
+
+#####################################################################################################################################
+# check to see distribution of barcodes that are present in all 5 replicates
+```{r, distribution of replicate numbers and barcode count in plasmid, eval=FALSE, tidy=TRUE}
+HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting <- HAR_all_Tag_Seq_processed_barcodes_assigned %>%
+  dplyr::mutate(HAR_7x_mut_pD2_rep_count = 
+                  (HAR_7x_mut_pDonor2_rep_1 > 0) +
+                  (HAR_7x_mut_pDonor2_rep_2 > 0) +
+                  (HAR_7x_mut_pDonor2_rep_3 > 0) +
+                  (HAR_7x_mut_pDonor2_rep_4 > 0) + 
+                  (HAR_7x_mut_pDonor2_rep_5 > 0),
+                HAR_7x_mut_pD3_rep_count = 
+                  (HAR_7x_mut_pDonor3_rep_1 > 0) +
+                  (HAR_7x_mut_pDonor3_rep_2 > 0) +
+                  (HAR_7x_mut_pDonor3_rep_3 > 0) +
+                  (HAR_7x_mut_pDonor3_rep_4 > 0) + 
+                  (HAR_7x_mut_pDonor3_rep_5 > 0))
+
+# total barcode counts for different replicate counts
+HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting %>%
+  group_by(HAR_7x_mut_pD2_rep_count) %>%
+  summarise(count = n())
+
+HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting %>%
+  group_by(HAR_7x_mut_pD3_rep_count) %>%
+  summarise(count = n())
+
+HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting %>%
+  group_by(HAR_7x_mut_pD2_rep_count, HAR_7x_mut_pD3_rep_count) %>%
+  summarise(count = n())
+
+
+# show distribution of barcode counts in HAR 7x mut pD2 for different replicate counts
+HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting_plot <- HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting %>%
+  ggplot() +
+  geom_histogram(aes(x = log10(HAR_7x_mut_pD2 + 1))) +
+  facet_wrap(~HAR_7x_mut_pD2_rep_count, scales = "free") +
+  theme_pubr()
+
+ggsave(HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting_plot, filename = "../figures/Mutagenesis_Analysis/HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting_plot.png", height = 8, width = 8)
+rm(HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting_plot)
+```
+```{r}
+knitr::include_graphics("../figures/Mutagenesis_Analysis/HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting_plot.png")
+```
+
+So it looks only pretty highly abundant HARs in the plasmids were represented in all 5 replicates, also only a small fraction of barcodes appear to be represented in all 5 replicates. 
+
+For pD2
+
+Only 24854 barcodes seem to be found in all 5 replicates... (strange dropout of barcodes in different replicates). When we look at the distribution of the plasmid read count and split them up by replicate count, it seems that for many of the relatively well expressed plasmid present barcodes, we still see many dropout cases. This is pretty surprising given the relative abundance of some of the other replicates... This might suggest that this is perhaps due to a barcode assignment problem, where there are small mistakes that might case the barcodes to be inaccurate. Alternatively, it might be an algorithmic issue, where the clustering algorithm might be making a mistake.
+
+For pD3
+
+it is only 21230 barcodes that are found in all 5 replicates.
+
+For both pD2 and pD3
+
+For barcodes that are found in all pD2 and pD3 replicates, there are only 4507. This might be an interesting subset to look into, though it is not necessary for making the pD2 and pD3 analyses
+
+Second issue is that many of the barcodes that are found in all 5 replicates are not assigned to a HAR probe.
+
+Because of this, it is necessary to check whether we see them in the list of variant called barcodes (since this is the most important)
+
+```{r, match with variant assigned barcodes, eval=FALSE, tidy=TRUE}
+# variant assigned barcodes
+variant_assigned_barcodes <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/caMPRA_development/EXP_00007_Barcode_Reg_Association/Saved_Data/high_mut_post_filter_correction_variants.txt")
+
+# combine with replicate counted tag seq information
+HAR_tag_seq_w_variant_info <- left_join(HAR_all_Tag_Seq_processed_barcodes_assigned_replicate_counting, variant_assigned_barcodes,
+                                        by = c("barcode" = "barcode"))
+
+
+# make visualization of pMPRA1 and pD2/pD3
+HAR_pMPRA1_pD2_pD3_comparison_plot <- HAR_tag_seq_w_variant_info %>%
+  dplyr::select(count, HAR_7x_mut_pD2, HAR_7x_mut_pD3) %>%
+  pivot_longer(cols = HAR_7x_mut_pD2:HAR_7x_mut_pD3,
+               names_to = "pdonor",
+               values_to = "pdonor_counts") %>%
+  dplyr::filter(!is.na(count)) %>%
+  ggplot() +
+  geom_point(aes(x = log10(count+1), y = log10(pdonor_counts+1), color = pdonor)) +
+  theme_pubr() +
+  facet_wrap(~pdonor)
+  
+ggsave(HAR_pMPRA1_pD2_pD3_comparison_plot, filename = "../figures/Mutagenesis_Analysis/HAR_pMPRA1_pD2_pD3_comparison_plot.pdf", width = 8, height = 4)
+
+# make a plot of sd plasmid counts?
+HAR_tag_seq_w_variant_stats <- HAR_tag_seq_w_variant_info %>%
+  dplyr::filter(HAR_7x_mut_pD2_rep_count == 5 | HAR_7x_mut_pD3_rep_count == 5) %>%
+  dplyr::mutate(pdonor = case_when(HAR_7x_mut_pD2 > 9 & HAR_7x_mut_pD3 > 9 ~ "both",
+                                   HAR_7x_mut_pD2 > 9 ~ "pD2",
+                                   HAR_7x_mut_pD3 > 9 ~ "pD3",
+                                   TRUE ~ "none")) %>%
+  dplyr::select(barcode, 
+                HAR_7x_mut_pD2, HAR_7x_mut_pD3, 
+                pdonor, HAR_7x_mut_pD2_rep_count,
+                HAR_7x_mut_pD3_rep_count, 
+                HAR_7x_mut_pDonor2_rep_1, 
+                HAR_7x_mut_pDonor2_rep_2, 
+                HAR_7x_mut_pDonor2_rep_3, 
+                HAR_7x_mut_pDonor2_rep_4, 
+                HAR_7x_mut_pDonor2_rep_5, 
+                HAR_7x_mut_pDonor3_rep_1,
+                HAR_7x_mut_pDonor3_rep_2, 
+                HAR_7x_mut_pDonor3_rep_3,
+                HAR_7x_mut_pDonor3_rep_4, 
+                HAR_7x_mut_pDonor3_rep_5) %>%
+  pivot_longer(cols = HAR_7x_mut_pDonor2_rep_1:HAR_7x_mut_pDonor3_rep_5,
+               names_to = "pdonor_rep",
+               values_to = "pdonor_rep_counts") %>%
+  dplyr::mutate(pdonor_rep_type = str_extract(pdonor_rep, "pDonor*.") %>%
+                  str_replace("Donor", "D")) %>%
+  # filter so that we only have barcodes represented in all 5 replicates for the different pdonors
+  dplyr::filter((pdonor_rep_type == "pD2" & HAR_7x_mut_pD2_rep_count == 5) | (pdonor_rep_type == "pD3" & HAR_7x_mut_pD3_rep_count == 5)) %>%
+  # filter so that pD2 only has pD2 rep and pD3 only has pD3 rep
+  dplyr::filter(pdonor == "both" | pdonor == pdonor_rep_type) %>%
+  dplyr::group_by(barcode, HAR_7x_mut_pD2, HAR_7x_mut_pD3, pdonor, pdonor_rep_type) %>%
+  dplyr::summarize(sd = sd(pdonor_rep_counts),
+                   mean = mean(pdonor_rep_counts),
+                   standardized_sd = sd/mean,
+                   min = min(pdonor_rep_counts)) %>%
+  pivot_longer(cols = HAR_7x_mut_pD2:HAR_7x_mut_pD3,
+               names_to = "pdonor_plasmid",
+               values_to = "pdonor_plasmid_counts") %>%
+  dplyr::mutate(pdonor_plasmid_type = str_extract(pdonor_plasmid, "pD*.")) %>%
+  dplyr::filter(pdonor_plasmid_type == pdonor_rep_type) 
+
+write_tsv(HAR_tag_seq_w_variant_stats, file = "../Saved_Data/Mutagenesis_Analysis/HAR_tag_seq_w_variant_stats.txt")
+
+HAR_tag_seq_w_variant_sd_plot <- HAR_tag_seq_w_variant_stats %>%
+  ggplot() +
+  geom_point(aes(x = log10(pdonor_plasmid_counts), y = standardized_sd, color = pdonor_plasmid_type)) +
+  facet_wrap(~pdonor_plasmid_type) +
+  theme_pubr()
+ggsave(HAR_tag_seq_w_variant_sd_plot, filename = "../figures/Mutagenesis_Analysis/HAR_tag_seq_w_variant_sd_plot.pdf")
+ggsave(HAR_tag_seq_w_variant_sd_plot, filename = "../figures/Mutagenesis_Analysis/HAR_tag_seq_w_variant_sd_plot.png")
+
+rm(HAR_tag_seq_w_variant_sd_plot)
+
+
+# good reason for 20 read cut off for filtering
+HAR_tag_seq_w_variant_min_plot <- HAR_tag_seq_w_variant_stats %>%
+  ggplot() +
+  geom_point(aes(x = log10(min+1), y = standardized_sd, color = pdonor_plasmid_type)) +
+  facet_wrap(~pdonor_plasmid_type) +
+  theme_pubr() +
+  geom_vline(xintercept = log10(20+1))
+ggsave(HAR_tag_seq_w_variant_min_plot, filename = "../figures/Mutagenesis_Analysis/HAR_tag_seq_w_variant_min_plot.pdf")
+ggsave(HAR_tag_seq_w_variant_min_plot, filename = "../figures/Mutagenesis_Analysis/HAR_tag_seq_w_variant_min_plot.png")
+
+rm(HAR_tag_seq_w_variant_min_plot)
+
+# previous version used cut off of 19 reads - justified by above
+HAR_tag_seq_w_variant_info_pD2_5_rep_only <- HAR_tag_seq_w_variant_info %>%
+  dplyr::filter(HAR_7x_mut_pD2_rep_count == 5) %>%
+  dplyr::filter(HAR_7x_mut_pD2 > 19 &
+                  HAR_7x_mut_pDonor2_rep_1 > 19 &
+                  HAR_7x_mut_pDonor2_rep_2 > 19 &
+                  HAR_7x_mut_pDonor2_rep_3 > 19 &
+                  HAR_7x_mut_pDonor2_rep_4 > 19 &
+                  HAR_7x_mut_pDonor2_rep_5 > 19) %>%
+  filter(!is.na(region) | !is.na(probe))
+
+
+HAR_tag_seq_w_variant_info_pD2_5_rep_only_test <- HAR_tag_seq_w_variant_info %>%
+  dplyr::filter(HAR_7x_mut_pD2_rep_count == 5) %>%
+  dplyr::filter(HAR_7x_mut_pD2 > 19) %>%
+  filter(!is.na(region) | !is.na(probe))
+
+length(unique(HAR_tag_seq_w_variant_info_pD2_5_rep_only$barcode))
+length(unique(HAR_tag_seq_w_variant_info_pD2_5_rep_only$var_id))
+
+HAR_tag_seq_w_variant_info_pD3_5_rep_only <- HAR_tag_seq_w_variant_info %>%
+  filter(HAR_7x_mut_pD3_rep_count == 5) %>%
+  dplyr::filter(HAR_7x_mut_pD3 > 19 &
+                  HAR_7x_mut_pDonor3_rep_1 > 19 &
+                  HAR_7x_mut_pDonor3_rep_2 > 19 &
+                  HAR_7x_mut_pDonor3_rep_3 > 19 &
+                  HAR_7x_mut_pDonor3_rep_4 > 19 &
+                  HAR_7x_mut_pDonor3_rep_5 > 19) %>%
+  filter(!is.na(region) | !is.na(probe))
+
+
+length(unique(HAR_tag_seq_w_variant_info_pD3_5_rep_only$barcode))
+length(unique(HAR_tag_seq_w_variant_info_pD3_5_rep_only$var_id))
+
+write_tsv(HAR_tag_seq_w_variant_info_pD2_5_rep_only, file = "../Saved_Data/HAR_tag_seq_w_variant_info_pD2_5_rep_only.txt")
+write_tsv(HAR_tag_seq_w_variant_info_pD3_5_rep_only, file = "../Saved_Data/HAR_tag_seq_w_variant_info_pD3_5_rep_only.txt")
+```
+
+```{r}
+knitr::include_graphics(path = "../figures/Mutagenesis_Analysis/HAR_tag_seq_w_variant_min_plot.png")
+```
+
+For HAR pD2
+It looks like there are only 10934 barcodes x variants. There are a total of 10664 unique barcodes (with or without variants), and 5362 unique variants (need to check how many of these are common variants...)
+
+
+pD3
+It looks like there are only 9671 barcodes x variants. There are a total of 11936 unique barcodes (with or without variants), and 5937 unique variants (check how many are common variants vs rare variants)
+
+Used a minimum barcode count cut off 20 or more so as below that there appears to be a distinct population of barcodes. There does appear to be correlation between the sd and the minimum barcode count, suggesting barcodes that have low counts in at least 1 replicate seems to be variable (sometimes, the barcode count for one variable will drop)
+
+```{r, variant called barcode check, eval=FALSE, tidy=TRUE}
+# to annotate variants that made it through this far after filtering, create small vcfs for annotation using vcfanno (will be performed on the cluster given databases are set up there)
+# write minimal vcf - remember to give variant ID for easier matching
+write_tsv(HAR_tag_seq_w_variant_info_pD2_5_rep_only %>% dplyr::mutate(ID = ".",
+                                                            DATA_1 = ".",
+                                                            DATA_2 = ".",
+                                                            DATA_3 = ".") %>% 
+            dplyr::select(CHROM, POS, ID, REF, ALT, DATA_1, DATA_2, DATA_3) %>%
+            distinct(),
+          file = "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD2.vcf")
+
+# minimal vcf with header
+write_tsv(HAR_tag_seq_w_variant_info_pD2_5_rep_only %>% dplyr::mutate(ID = ".",
+                                                            QUAL = "99",
+                                                            FILTER = "PASS",
+                                                            INFO = ".",
+                                                            FORMAT = ".",
+                                                            GT = "1/1") %>% 
+            dplyr::select(CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO, FORMAT, GT)  %>%
+            dplyr::filter(!is.na(POS)) %>%
+            distinct() %>%
+            dplyr::rename(`#CHROM` = CHROM),
+          file = "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD2.wheader.vcf",
+          col_names = TRUE)
+
+# minimal vcf with header
+write_tsv(HAR_tag_seq_w_variant_info_pD3_5_rep_only %>% dplyr::mutate(ID = ".",
+                                                            QUAL = "99",
+                                                            FILTER = "PASS",
+                                                            INFO = ".",
+                                                            FORMAT = ".",
+                                                            GT = "1/1") %>% 
+            dplyr::select(CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO, FORMAT, GT)  %>%
+            dplyr::filter(!is.na(POS)) %>%
+            distinct() %>%
+            dplyr::rename(`#CHROM` = CHROM),
+          file = "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_masked_pD3.wheader.vcf",
+          col_names = TRUE)
+
+# write chr versions (old versions are without ##fileformat=VCFv4.2)
+# "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD2.chr.wheader.vcf"
+# "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_masked_pD3.chr.wheader.vcf"
+write_tsv(tibble("##fileformat=VCFv4.2"),
+          file = "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD2.chr.wheader.v4.2.vcf",
+          col_names = FALSE)
+
+write_tsv(HAR_tag_seq_w_variant_info_pD2_5_rep_only %>% dplyr::mutate(
+  CHROM = paste0("chr",CHROM),
+  ID = ".",
+  QUAL = "99",
+  FILTER = "PASS",
+  INFO = ".",
+  FORMAT = ".",
+  GT = "1/1") %>%
+    dplyr::select(CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO, FORMAT, GT)  %>%
+    dplyr::filter(!is.na(POS)) %>%
+    distinct() %>%
+    dplyr::arrange(CHROM, POS) %>%
+    dplyr::rename(`#CHROM` = CHROM),
+  file = "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD2.chr.wheader.v4.2.vcf",
+  col_names = TRUE,
+  append = TRUE)
+
+
+write_tsv(tibble("##fileformat=VCFv4.2"),
+          file = "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_masked_pD3.chr.wheader.v4.2.vcf",
+          col_names = FALSE)
+write_tsv(HAR_tag_seq_w_variant_info_pD3_5_rep_only %>% dplyr::mutate(
+  CHROM = paste0("chr",CHROM),
+  ID = ".",
+  QUAL = "99",
+  FILTER = "PASS",
+  INFO = ".",
+  FORMAT = ".",
+  GT = "1/1") %>%
+    dplyr::select(CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO, FORMAT, GT)  %>%
+    dplyr::filter(!is.na(POS)) %>%
+    distinct() %>%
+    dplyr::rename(`#CHROM` = CHROM),
+  file = "Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD3.chr.wheader.v4.2.vcf",
+  col_names = TRUE,
+  append = TRUE)
+```
+
