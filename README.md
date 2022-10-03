@@ -18,8 +18,6 @@ More lengthy analysis of random mutagenesis + capture-based Massively parallel r
 (https://oldmantae.github.io/Code_Sample/random_mut_caMPRA_analysis/EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_2_Prelim_variant_effects.html)
 - EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_3_Masked_variant_effects.Rmd
 (https://oldmantae.github.io/Code_Sample/random_mut_caMPRA_analysis/EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_3_Masked_variant_effects.html)
-- EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_4_Variant_Annotations_and_effects.Rmd
-(https://oldmantae.github.io/Code_Sample/random_mut_caMPRA_analysis/EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_4_Variant_Annotations_and_effects.html)
 
 On-going analysis of variant effects of patient variants (small snippet):
 - EXP_00010_Variant_TF_Analysis_Sample.Rmd
