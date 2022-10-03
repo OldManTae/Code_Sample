@@ -8,8 +8,8 @@ A simple pipeline for pre-processing raw data from a molecular tool we developed
 - caMPRA_tag_seq.umi_tools.10nt.Snakefile.yaml
 - EXP_00007_Process_Tag_Seq_umi_tools_10nt_snakemake.sh
 
-On-going analysis of variant effects of patient variants (small snippet):
-- EXP_00010_Variant_TF_Analysis_Sample.Rmd
+Script for pre-processing targeted sequencing data based on custom designed molecular inversion probes:
+- MIPs_non_MIPgen_v8.sh
 
 More lengthy analysis of random mutagenesis + capture-based Massively parallel reporter assay (.Rmd files as well as html output for graphics):
 - EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_1_QC_and_filtering.Rmd
@@ -20,6 +20,9 @@ More lengthy analysis of random mutagenesis + capture-based Massively parallel r
 (https://oldmantae.github.io/Code_Sample/random_mut_caMPRA_analysis/EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_3_Masked_variant_effects.html)
 - EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_4_Variant_Annotations_and_effects.Rmd
 (https://oldmantae.github.io/Code_Sample/random_mut_caMPRA_analysis/EXP_00007_HAR_caMPRA_Tag_Seq_Analysis_Mutagenesis_Analysis_4_Variant_Annotations_and_effects.html)
+
+On-going analysis of variant effects of patient variants (small snippet):
+- EXP_00010_Variant_TF_Analysis_Sample.Rmd
 
 Design of MPRA constructs for patient variant validation (designing controls as well as python script/jupyter notebook to design the actual probes):
 - EXP_00027_SCZ_Variant_Validation.Rmd
