@@ -2013,20 +2013,14 @@ limitations</p>
 </div>
 <div id="preliminary-analysis-with-campra-probe-assigned-barcodes" class="section level1">
 <h1>Preliminary analysis with caMPRA probe assigned barcodes</h1>
-</div>
-<div id="note-that-there-are-some-limitations-that-should-be-considered" class="section level1">
-<h1>note that there are some limitations that should be considered</h1>
-</div>
-<div id="the-umi_tools-split-method-depletes-rare-barcodes-which-could-affect-potentially-important-barcodes-though-they-tend-to-be-pretty-inconsistent-so-it-is-better-to-filter-out" class="section level1">
-<h1>1. the umi_tools split method depletes rare barcodes, which could
-affect potentially important barcodes (though they tend to be pretty
-inconsistent so it is better to filter out)</h1>
-</div>
-<div id="the-deduplication-method-picks-out-the-more-common-region-which-works-fine-for-most-cases-one-seems-to-be-a-clear-lead---however-there-can-be-issues-especially-when-there-are-multiple-cross-overs-or-the-relative-amounts-of-the-different-regions-are-similar" class="section level1">
-<h1>2. the deduplication method picks out the more common region, which
-works fine for most cases one seems to be a clear lead - however, there
-can be issues, especially when there are multiple cross overs or the
-relative amounts of the different regions are similar</h1>
+<p>Note that there are some limitations that should be considered 1. the
+umi_tools split method depletes rare barcodes, which could affect
+potentially important barcodes (though they tend to be pretty
+inconsistent so it is better to filter out) 2. the deduplication method
+picks out the more common region, which works fine for most cases one
+seems to be a clear lead - however, there can be issues, especially when
+there are multiple cross overs or the relative amounts of the different
+regions are similar</p>
 <pre class="r"><code># read in variants as granges
 variant_vcfs &lt;- c(&quot;../Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD2.chr.wheader.v4.2.vcf&quot;,
                   &quot;../Saved_Data/Mutagenesis_Analysis/HAR_20ng_7x_mut_variants_pD3.chr.wheader.v4.2.vcf&quot;)
