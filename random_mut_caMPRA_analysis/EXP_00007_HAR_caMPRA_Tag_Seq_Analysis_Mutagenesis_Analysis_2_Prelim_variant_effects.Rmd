@@ -202,9 +202,9 @@ So it looks like we get pretty good distribution of variants throughout the prob
 
 #######################################################################################################################################
 # Preliminary analysis with caMPRA probe assigned barcodes
-# note that there are some limitations that should be considered
-# 1. the umi_tools split method depletes rare barcodes, which could affect potentially important barcodes (though they tend to be pretty inconsistent so it is better to filter out)
-# 2. the deduplication method picks out the more common region, which works fine for most cases one seems to be a clear lead - however, there can be issues, especially when there are multiple cross overs or the relative amounts of the different regions are similar
+Note that there are some limitations that should be considered
+1. the umi_tools split method depletes rare barcodes, which could affect potentially important barcodes (though they tend to be pretty inconsistent so it is better to filter out)
+2. the deduplication method picks out the more common region, which works fine for most cases one seems to be a clear lead - however, there can be issues, especially when there are multiple cross overs or the relative amounts of the different regions are similar
 
 ```{r, read in variants, eval=FALSE}
 # read in variants as granges
