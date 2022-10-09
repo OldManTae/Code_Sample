@@ -1,11 +1,13 @@
 ---
 title: "TMEM161B"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 ---
 
 This script is to visualize genomic interaction data as well as epigenetic marks associated with enhancers. The focus is on TMEM161B, our gene of interest, to identify candidate enhancers that may be regulating the expression of this gene. Most of the figures are exploratory, with the final figure generated at the very end
 
-```{r, load necessary libraries, include=FALSE}
+```{r, load necessary libraries, message=FALSE, include=FALSE, tidy=TRUE}
 library(tidyverse)
 library(tidygenomics)
 library(ggpubr)
@@ -16,10 +18,10 @@ library(AnnotationHub)
 library(rtracklayer)
 library(GenomicInteractions)
 library(pryr)
-knitr::knit("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Functions/Genome_Viewer_Functions_hg38.Rmd")
+source("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Functions/Genome_Viewer_Functions_hg38.R")
 ```
 
-```{r}
+```{r, tidy=TRUE}
 # TM161B
 # prepare for liftover (for some data tracks)
 hub <- AnnotationHub()
@@ -48,6 +50,9 @@ Data_range <- GRanges(seqnames = chr,
 walsh_fetal_brain_1 <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/data/FB68_Bulk_27ac.bw", which = Data_range)
 walsh_fetal_brain_2 <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/data/FB81_Bulk_27ac.bw", which = Data_range)
 walsh_fetal_brain_3 <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/data/FB91_Bulk_27ac.bw", which = Data_range)
+
+# set genome
+gen <- "hg38"
 
 # make tracks of walsh lab fetal H3K27ac
 walsh_fetal_brain_1_track <- DataTrack(walsh_fetal_brain_1, genome = gen, chromosome = "chr5", name = "Fetal\nH3K27ac\n1")
@@ -155,11 +160,11 @@ HARs_hg38_track <- AnnotationTrack(HARs_hg38 %>% makeGRangesFromDataFrame(.), st
 
 
 ```
-```{r}
+```{r, tidy=TRUE}
 knitr::include_graphics("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/zoom_out.png")
 ```
 
-```{r alternative interaction data from Nott et al}
+```{r alternative interaction data from Nott et al, tidy=TRUE}
 Neuron_Interactome_adult_Nott_pairs_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Neuron_Interactome_adult_Nott_pairs_hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2"))
 
 ## separate out interactions by genes
@@ -237,7 +242,7 @@ TM_regions_of_interest_hg38_track <- AnnotationTrack(TM_regions_of_interest_hg38
 
 ```
 
-```{r}
+```{r, tidy=TRUE}
 save_file_2 = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/smaller_window.png"
   
   # generate and save figure
@@ -281,11 +286,11 @@ save_file_2 = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_No
     to=88750000)
   dev.off()
 ```
-```{r}
+```{r, tidy=TRUE}
 knitr::include_graphics("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/smaller_window.png")
 ```
 
-```{r}
+```{r, tidy=TRUE}
 save_file_3 = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/Shyam_requested.png"
 
 
@@ -338,7 +343,7 @@ fetal_adult_brain_interactions_and_annotations_plot <- plotTracks(list(
   to=88899489)
 dev.off()
 ```
-```{r}
+```{r, tidy=TRUE}
 knitr::include_graphics("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/Shyam_requested.png")
 ```
 
