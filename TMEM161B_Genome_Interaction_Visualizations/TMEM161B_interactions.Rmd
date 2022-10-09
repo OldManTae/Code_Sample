@@ -1,0 +1,344 @@
+---
+title: "TMEM161B"
+output: html_notebook
+---
+
+This script is to visualize genomic interaction data as well as epigenetic marks associated with enhancers. The focus is on TMEM161B, our gene of interest, to identify candidate enhancers that may be regulating the expression of this gene. Most of the figures are exploratory, with the final figure generated at the very end
+
+```{r, load necessary libraries, include=FALSE}
+library(tidyverse)
+library(tidygenomics)
+library(ggpubr)
+library(Gviz)
+library(GenomicRanges)
+library(biomaRt)
+library(AnnotationHub)
+library(rtracklayer)
+library(GenomicInteractions)
+library(pryr)
+knitr::knit("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Functions/Genome_Viewer_Functions_hg38.Rmd")
+```
+
+```{r}
+# TM161B
+# prepare for liftover (for some data tracks)
+hub <- AnnotationHub()
+chain_hg19_to_hg38 <- query(hub, 'hg19ToHg38')[[1]]
+  
+  
+TM_regions_of_interest_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Shyam/TMEM161B_TMEM161B-AS1_regions_of_interest.txt") %>%
+  separate(col = region, into = c("chr", "start", "end"), sep = "\\:|\\-") %>%
+  dplyr::mutate(start = as.numeric(start),
+                end = as.numeric(end),
+                score = 1000) %>%
+  dplyr::rename(name = element_name) %>%
+  bed_liftOver(., chain_hg19_to_hg38)
+
+  chr = "chr5"
+  start_window = 87751097 - 1000000
+  end_window = 88481366 + 1000000
+  temp_dir = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/temp"
+  save_file = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/zoom_out.png"
+  
+  
+# take in extra walsh lab fetal brain information
+Data_range <- GRanges(seqnames = chr,
+                        ranges = IRanges(start = start_window, end  = end_window))
+
+walsh_fetal_brain_1 <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/data/FB68_Bulk_27ac.bw", which = Data_range)
+walsh_fetal_brain_2 <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/data/FB81_Bulk_27ac.bw", which = Data_range)
+walsh_fetal_brain_3 <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/data/FB91_Bulk_27ac.bw", which = Data_range)
+
+# make tracks of walsh lab fetal H3K27ac
+walsh_fetal_brain_1_track <- DataTrack(walsh_fetal_brain_1, genome = gen, chromosome = "chr5", name = "Fetal\nH3K27ac\n1")
+walsh_fetal_brain_2_track <- DataTrack(walsh_fetal_brain_2, genome = gen, chromosome = "chr5", name = "Fetal\nH3K27ac\n2")
+walsh_fetal_brain_3_track <- DataTrack(walsh_fetal_brain_3, genome = gen, chromosome = "chr5", name = "Fetal\nH3K27ac\n3")
+
+  
+# Genehancer interactions
+genehancer_v5_interactions <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/data/Genehancer_V5_TMEM161B_loci") %>%
+  dplyr::select(geneChrom, geneStart, geneEnd, geneHancerChrom, geneHancerStart, geneHancerEnd, name, score, geneStrand, geneHancerStrand, geneName) %>%
+  dplyr::rename(chr1 = geneChrom, start1 = geneStart, end1 = geneEnd, chr2 = geneHancerChrom, start2 = geneHancerStart, end2 = geneHancerEnd, strand1 = geneStrand, strand2 = geneHancerStrand) %>%
+  dplyr::filter(str_detect(geneName, "TMEM161B")) %>%
+  dplyr::mutate(strand2 = case_when(strand2 == "." ~ "*",
+                                    TRUE ~ strand2),
+                score = 100) %>%
+  dplyr::filter(!str_detect(geneName, "lnc-TMEM161B")) %>%
+  dplyr::select(-geneName)
+
+write_tsv(genehancer_v5_interactions, path = "data/genehancer_v5_interactions_TMEM161B.bedpe", col_names = FALSE)
+
+TMEM161B_genehancer_interactions_v5 <- makeGenomicInteractionsFromFile("data/genehancer_v5_interactions_TMEM161B.bedpe", type = "bedpe")
+
+TMEM161B_genehancer_interactions_v5_track <- InteractionTrack(TMEM161B_genehancer_interactions_v5, name = "Genehancer\ninteractions\nv5", 
+                                                            chromosome = "chr5")
+
+# HARs
+HARs_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/HAR_Analysis_Cohort/EXP_00006_Gnomad/hg38_HARs.bed", col_names = c("chr", "start", "end", "HAR"))
+HARs_hg38_track <- AnnotationTrack(HARs_hg38 %>% makeGRangesFromDataFrame(.), stacking = "full", group = HARs_hg38$HAR, name = "HARs")
+
+  # set up initial values
+  # set up Gviz
+  # genome : "hg38" 
+  gen <- "hg38"
+  #Chromosme name : "chr5"
+  chr <- chr
+  # genome axis track
+  gtrack <- GenomeAxisTrack()
+  #Ideogram track
+  itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+  
+  
+  # gene models
+  # hg38
+  mart_hg38 <- useMart(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+  # hg38
+  biomTrack_hg38 <- BiomartGeneRegionTrack(genome="hg38", chromosome="chr5",
+                                           name="ENSEMBL", biomart=mart_hg38, stacking = "pack", filter = list(with_hgnc = TRUE), collapseTranscripts = "longest")
+  
+  
+  # load data bases
+  Nott_interactions <- Nott_interaction_viewer(chr = chr,
+                                               start = start_window,
+                                               end = end_window,
+                                               temp_dir = temp_dir)
+  
+  
+  Song_interactions <- Song_interaction_viewer(chr = chr,
+                                               start = start_window,
+                                               end = end_window,
+                                               temp_dir = temp_dir)
+  
+  Song_epigenome <- Song_epigenome_viewer(chr = chr,
+                                               start = start_window,
+                                               end = end_window)
+                                               
+  
+  Nott_annotation <- Nott_annotation_viewer(chr = chr,
+                                               start = start_window,
+                                               end = end_window)
+  
+  # generate and save figure
+  png(filename = save_file, height = 2400, width = 2400)
+  fetal_adult_brain_interactions_and_annotations_plot <- plotTracks(list(
+    itrack,
+    gtrack,
+    Nott_interactions$Neuron_Interactome_adult_Nott_track,
+    Nott_interactions$Oligo_Interactome_adult_Nott_track,
+    Nott_interactions$Microglia_Interactome_adult_Nott_track,
+    Song_interactions$fetal_brain_interaction_song_eN_track,
+    Song_interactions$fetal_brain_interaction_song_iN_track,
+    Song_interactions$fetal_brain_interaction_song_IPC_track,
+    Song_interactions$fetal_brain_interaction_song_RG_track,
+    Nott_annotation$Nott_neuronal_enhancers_track,
+    Nott_annotation$Nott_oligo_enhancers_track,
+    Nott_annotation$Nott_microglia_enhancers_track,
+    Nott_annotation$Nott_astrocytes_enhancers_track,
+    Nott_annotation$Nott_neuronal_promoters_track,
+    walsh_fetal_brain_1_track,
+    walsh_fetal_brain_2_track,
+    walsh_fetal_brain_3_track,
+    biomTrack_hg38), 
+    transcriptAnnotation = "symbol", 
+    sizes=c(1,1,
+            1,1,1,
+            1,1,1,1,
+            1,1,1,1,1,
+            1,1,1,
+            3),
+    from=86751097,
+    to=89481366)
+  dev.off()
+  rm(fetal_adult_brain_interactions_and_annotations_plot)
+  
+
+
+
+```
+```{r}
+knitr::include_graphics("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/zoom_out.png")
+```
+
+```{r alternative interaction data from Nott et al}
+Neuron_Interactome_adult_Nott_pairs_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Neuron_Interactome_adult_Nott_pairs_hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2"))
+
+## separate out interactions by genes
+# TMEM161B
+TMEM161B_interaction_pairs_Nott_Neuron_hg38 <- split_interactions_by_geneTSS_restricted(Neuron_Interactome_adult_Nott_pairs_hg38, "TMEM161B", padding = 5000, TSS_lim_1 = 88268799, TSS_lim_2 = 88273857)
+write_tsv(TMEM161B_interaction_pairs_Nott_Neuron_hg38, path = "TMEM161B_interaction_pairs_Nott_Neuron_hg38.bedpe", col_names = FALSE)
+
+TMEM161B_interaction_pairs_Nott_Neuron_hg38_processed <- makeGenomicInteractionsFromFile("TMEM161B_interaction_pairs_Nott_Neuron_hg38.bedpe", type = "bedpe")
+
+TMEM161B_interaction_pairs_Nott_Neuron_hg38_track <- InteractionTrack(TMEM161B_interaction_pairs_Nott_Neuron_hg38_processed, name = "Nott Adult Neuron", 
+                                                            chromosome = "chr5")
+
+
+
+# fetal brain
+fetal_brain_interaction_song_eN_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_eN.hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2", "count", "expected", "fdr"))
+fetal_brain_interaction_song_iN_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_iN.hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2", "count", "expected", "fdr"))
+fetal_brain_interaction_song_IPC_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_IPC.hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2", "count", "expected", "fdr"))
+fetal_brain_interaction_song_RG_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_RG.hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2", "count", "expected", "fdr"))
+
+
+
+## separate out interactions by genes
+# TMEM161B
+TMEM161B_fetal_brain_interaction_song_eN_hg38 <- split_interactions_by_geneTSS(fetal_brain_interaction_song_eN_hg38, "TMEM161B", padding = 5000)
+write_tsv(TMEM161B_fetal_brain_interaction_song_eN_hg38, path = "TMEM161B_fetal_brain_interaction_song_eN_hg38.bedpe", col_names = FALSE)
+
+
+TMEM161B_fetal_brain_interaction_song_eN_hg38_processed <- makeGenomicInteractionsFromFile("TMEM161B_fetal_brain_interaction_song_eN_hg38.bedpe", type = "bedpe")
+
+TMEM161B_fetal_brain_interaction_song_eN_hg38_track <- InteractionTrack(TMEM161B_fetal_brain_interaction_song_eN_hg38_processed, name = "Song Fetal eN", 
+                                                            chromosome = "chr5")
+
+
+TMEM161B_fetal_brain_interaction_song_iN_hg38 <- split_interactions_by_geneTSS(fetal_brain_interaction_song_iN_hg38, "TMEM161B", padding = 5000)
+write_tsv(TMEM161B_fetal_brain_interaction_song_iN_hg38, path = "TMEM161B_fetal_brain_interaction_song_iN_hg38.bedpe", col_names = FALSE)
+
+
+TMEM161B_fetal_brain_interaction_song_iN_hg38_processed <- makeGenomicInteractionsFromFile("TMEM161B_fetal_brain_interaction_song_iN_hg38.bedpe", type = "bedpe")
+
+TMEM161B_fetal_brain_interaction_song_iN_hg38_track <- InteractionTrack(TMEM161B_fetal_brain_interaction_song_iN_hg38_processed, name = "Song Fetal iN", 
+                                                            chromosome = "chr5")
+
+
+
+
+TMEM161B_fetal_brain_interaction_song_IPC_hg38 <- split_interactions_by_geneTSS(fetal_brain_interaction_song_IPC_hg38, "TMEM161B", padding = 5000)
+write_tsv(TMEM161B_fetal_brain_interaction_song_IPC_hg38, path = "TMEM161B_fetal_brain_interaction_song_IPC_hg38.bedpe", col_names = FALSE)
+
+
+TMEM161B_fetal_brain_interaction_song_IPC_hg38_processed <- makeGenomicInteractionsFromFile("TMEM161B_fetal_brain_interaction_song_IPC_hg38.bedpe", type = "bedpe")
+
+TMEM161B_fetal_brain_interaction_song_IPC_hg38_track <- InteractionTrack(TMEM161B_fetal_brain_interaction_song_IPC_hg38_processed, name = "Song Fetal IPC", 
+                                                            chromosome = "chr5")
+
+
+
+
+TMEM161B_fetal_brain_interaction_song_RG_hg38 <- split_interactions_by_geneTSS_restricted(fetal_brain_interaction_song_RG_hg38, "TMEM161B", padding = 5000, TSS_lim_1 = 88268799, TSS_lim_2 = 88273857)
+
+write_tsv(TMEM161B_fetal_brain_interaction_song_RG_hg38, path = "TMEM161B_fetal_brain_interaction_song_RG_hg38.bedpe", col_names = FALSE)
+
+
+TMEM161B_fetal_brain_interaction_song_RG_hg38_processed <- makeGenomicInteractionsFromFile("TMEM161B_fetal_brain_interaction_song_RG_hg38.bedpe", type = "bedpe")
+
+TMEM161B_fetal_brain_interaction_song_RG_hg38_track <- InteractionTrack(TMEM161B_fetal_brain_interaction_song_RG_hg38_processed, name = "Song Fetal RG", 
+                                                            chromosome = "chr5")
+
+
+
+TM_regions_of_interest_hg38_track <- AnnotationTrack(TM_regions_of_interest_hg38 %>% makeGRangesFromDataFrame(.), stacking = "full", group = TM_regions_of_interest_hg38$name, name = "Candidate Enhancers")
+
+#displayPars(TM_regions_of_interest_hg38_track) <- list(showId = TRUE)
+
+
+```
+
+```{r}
+save_file_2 = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/smaller_window.png"
+  
+  # generate and save figure
+  png(filename = save_file_2, height = 2400, width = 2400)
+  fetal_adult_brain_interactions_and_annotations_plot <- plotTracks(list(
+    itrack,
+    gtrack,
+    Nott_interactions$Neuron_Interactome_adult_Nott_track,
+    Nott_interactions$Oligo_Interactome_adult_Nott_track,
+    Nott_interactions$Microglia_Interactome_adult_Nott_track,
+    Song_interactions$fetal_brain_interaction_song_eN_track,
+    Song_interactions$fetal_brain_interaction_song_iN_track,
+    Song_interactions$fetal_brain_interaction_song_IPC_track,
+    Song_interactions$fetal_brain_interaction_song_RG_track,
+    Song_epigenome$fetal_brain_atac_eN_track,
+    Song_epigenome$fetal_brain_atac_iN_track,
+    Song_epigenome$fetal_brain_atac_IPC_track,
+    Song_epigenome$fetal_brain_atac_RG_track,
+    Nott_annotation$Nott_neuronal_enhancers_track,
+    Nott_annotation$Nott_oligo_enhancers_track,
+    Nott_annotation$Nott_microglia_enhancers_track,
+    Nott_annotation$Nott_astrocytes_enhancers_track,
+    Nott_annotation$Nott_neuronal_promoters_track,
+    TMEM161B_interaction_pairs_Nott_Neuron_hg38_track,
+    TMEM161B_fetal_brain_interaction_song_eN_hg38_track,
+    TMEM161B_fetal_brain_interaction_song_iN_hg38_track,
+    TMEM161B_fetal_brain_interaction_song_IPC_hg38_track,
+    TMEM161B_fetal_brain_interaction_song_RG_hg38_track,
+    TM_regions_of_interest_hg38_track,
+    biomTrack_hg38), 
+    transcriptAnnotation = "symbol", 
+    sizes=c(1,1,
+            1,1,1,
+            1,1,1,1,
+            1,1,1,1,
+            1,1,1,1,1,
+            2,2,2,2,2,
+            1,
+            3),
+    from=87750000,
+    to=88750000)
+  dev.off()
+```
+```{r}
+knitr::include_graphics("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/smaller_window.png")
+```
+
+```{r}
+save_file_3 = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/Shyam_requested.png"
+
+
+# set colors for tracks
+displayPars(Nott_annotation$Nott_neuronal_promoters_track) <- list(fontsize = 18)
+
+displayPars(TMEM161B_interaction_pairs_Nott_Neuron_hg38_track) <- list(col.interactions = "#E74C3C", fontsize = 18)
+displayPars(TMEM161B_fetal_brain_interaction_song_eN_hg38_track) <- list(col.interactions = "#3498DB", fontsize = 18)
+displayPars(TMEM161B_fetal_brain_interaction_song_RG_hg38_track) <- list(col.interactions = "#3eb110", fontsize = 18)
+displayPars(TMEM161B_genehancer_interactions_v5_track) <- list(col.interactions = "#636363", fontsize = 18)
+
+displayPars(walsh_fetal_brain_1_track) <- list(col = "#feb24c", fontsize = 18)
+displayPars(walsh_fetal_brain_2_track) <- list(col = "#feb24c", fontsize = 18)
+displayPars(walsh_fetal_brain_3_track) <- list(col = "#feb24c", fontsize = 18)
+
+displayPars(HARs_hg38_track) <- list(fontsize.group = 20, fontsize = 18)
+displayPars(TM_regions_of_interest_hg38_track) <- list(fontsize.group = 20, fontsize = 18)
+
+displayPars(biomTrack_hg38) <- list(fontsize.group = 20, fontsize = 18)
+
+# generate and save figure
+png(filename = save_file_3, height = 900, width = 1200)
+fetal_adult_brain_interactions_and_annotations_plot <- plotTracks(list(
+  itrack,
+  gtrack,
+  TMEM161B_interaction_pairs_Nott_Neuron_hg38_track,
+  TMEM161B_fetal_brain_interaction_song_eN_hg38_track,
+  TMEM161B_fetal_brain_interaction_song_RG_hg38_track,
+  TMEM161B_genehancer_interactions_v5_track,
+  walsh_fetal_brain_1_track,
+  walsh_fetal_brain_2_track,
+  walsh_fetal_brain_3_track,
+  HARs_hg38_track,
+  TM_regions_of_interest_hg38_track,
+  biomTrack_hg38), 
+  transcriptAnnotation = "symbol",
+  groupAnnotation = "group",
+  just.group = "above",
+  background.title = "transparent",
+  col.title = "#636363",
+  col.line = "#636363",
+  sizes=c(1,1,
+          1,1,1,
+          1,
+          1,1,1,
+          1,
+          1,
+          1),
+  from=87724980,
+  to=88899489)
+dev.off()
+```
+```{r}
+knitr::include_graphics("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects_Not_HAR/Misc/Misc/Shyam/TMEM161B/figures/Shyam_requested.png")
+```
+

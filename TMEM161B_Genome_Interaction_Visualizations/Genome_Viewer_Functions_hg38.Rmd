@@ -1,0 +1,787 @@
+---
+title: "Genome_Viewer"
+output: html_notebook
+---
+
+#This script is to make a self sufficient function to easy look up regions and genes of interest. The viewer will provide information on interactions, ATAC-peaks, histone marks, and pre-called functional annotations
+# note that this script will use reference data based on hg38
+
+# update
+01/11/21
+script will add Trevino_et_al ATAC regions as well as inferred connections
+
+```{r, load necessary libraries}
+library(tidyverse)
+library(tidygenomics)
+library(ggpubr)
+library(Gviz)
+library(GenomicRanges)
+library(biomaRt)
+library(AnnotationHub)
+library(rtracklayer)
+library(GenomicInteractions)
+library(pryr)
+```
+
+
+# Custom helper functions
+
+```{r, custom_functions}
+order_start_end <- function(df){
+  # ordered subset
+  start_end_df <- df %>%
+    dplyr::filter(start <= end)
+  # disordered subset
+  end_start_df <- df %>%
+    dplyr::filter(end < start) %>%
+    dplyr::rename(start = end, end = start)
+  
+  combined_df <- bind_rows(start_end_df, end_start_df)
+  return(combined_df)
+}
+
+# function for sorting pairs of regions
+order_start_end_xy <- function(df){
+  # ordered subset
+  start_end_df <- df %>%
+    dplyr::filter(start.x <= start.y)
+  # disordered subset
+  end_start_df <- df %>%
+    dplyr::filter(start.y < start.x) %>%
+    dplyr::rename(start.x = start.y, start.y = start.x, end.x = end.y, end.y = end.x)
+  combined_df <- bind_rows(start_end_df, end_start_df)
+  return(combined_df)
+}
+
+```
+
+
+```{r, liftover functions}
+# liftOver Gviz to different chain
+Gvis_liftOver <- function(biomartGeneRegionTrackdf, chain){
+  converted_df <- liftOver(ranges(biomartGeneRegionTrackdf), chain)
+  converted_df <- unlist(converted_df)
+  converted_track <- GeneRegionTrack(converted_df)
+  return(converted_track)
+}
+
+# liftOver Gviz DataTrack
+Gviz_Data_liftOver <- function(DataTrackdf, chain){
+  converted_df <- liftOver(ranges(DataTrackdf), chain)
+  converted_df <- unlist(converted_df)
+  converted_track <- DataTrack(converted_df)
+  return(converted_track)
+}
+
+# liftOver ranges to different chain
+ranges_liftOver <- function(ranges, chain){
+  converted_df <- liftOver(ranges, chain)
+  converted_df <- unlist(converted_df)
+  return(converted_df)
+}
+
+# liftover bedpe
+# note that this function will merge elements that are up to 100 bp apart. This is a rough smoothing approach since rtracklayer liftover results in fragmented liftover otherwise
+bedpe_liftOver <- function(bedpe_df, chain){
+  # extract information
+  bed_info <- bedpe_df %>%
+    dplyr::select(-c(chr1, start1, end1, chr2, start2, end2))
+  
+  # first split bedpe into two separate dfs
+  bed_part_1 <- bedpe_df %>%
+    dplyr::select(-c(chr2, start2, end2))
+  bed_part_2 <- bedpe_df %>%
+    dplyr::select(-c(chr1, start1, end1))
+  
+  
+  # perform liftover individually
+  bed_part_1_liftOver <- liftOver(
+    bed_part_1 %>%
+      makeGRangesFromDataFrame(seqnames.field=c("chr1"),
+                               start.field="start1",
+                               end.field="end1",
+                               keep.extra.columns = TRUE),
+    chain) %>%
+    unlist() %>%
+    as_tibble() %>%
+    # merge intersecting segments
+    genome_cluster(by = c("seqnames", "start", "end"), max_distance = 100) %>% 
+    group_by(seqnames, name, cluster_id) %>% 
+    summarize(start = min(start), end = max(end)) %>%
+    dplyr::rename(chr1 = seqnames,
+                  start1 = start,
+                  end1 = end) %>%
+    dplyr::select(chr1, start1, end1, name)
+  
+  bed_part_2_liftOver <- liftOver(
+    bed_part_2 %>%
+      makeGRangesFromDataFrame(seqnames.field=c("chr2"),
+                               start.field="start2",
+                               end.field="end2",
+                               keep.extra.columns = TRUE),
+    chain) %>%
+    unlist() %>%
+    as_tibble() %>%
+    # merge intersecting segments
+    genome_cluster(by = c("seqnames", "start", "end"), max_distance = 100) %>% 
+    group_by(seqnames, name, cluster_id) %>% 
+    summarize(start = min(start), end = max(end)) %>%
+    dplyr::rename(chr2 = seqnames,
+                  start2 = start,
+                  end2 = end)
+  
+  
+  bedpe_liftOver_ranges <- full_join(bed_part_1_liftOver, bed_part_2_liftOver, by = c("name" = "name")) %>%
+    full_join(., bed_info, by = c("name" = "name")) %>%
+    dplyr::select(chr1, start1, end1, chr2, start2, end2, name, score, strand1, strand2, everything()) %>%
+    # remove na
+    drop_na()
+  
+  return(bedpe_liftOver_ranges)
+}
+
+# liftover bed
+# note that this function will merge elements that are up to 100 bp apart. This is a rough smoothing approach since rtracklayer liftover results in fragmented liftover otherwise
+bed_liftOver <- function(bed_df, chain){
+  # perform liftover individually
+  bed_converted <- liftOver(
+    bed_df %>%
+    makeGRangesFromDataFrame(seqnames.field=c("chr"),
+                             start.field="start",
+                             end.field="end",
+                             keep.extra.columns = TRUE),
+    chain) %>%
+    unlist() %>%
+    as_tibble() %>%
+    # merge intersecting segments
+    genome_cluster(by = c("seqnames", "start", "end"), max_distance = 100) %>% 
+    group_by(across(-c("start", "end"))) %>%
+    summarize(start = min(start), end = max(end)) %>%
+    dplyr::rename(chr = seqnames,
+                  start = start,
+                  end = end) %>%
+    ungroup() %>%
+    dplyr::select(chr, start, end, name, score, strand, everything(), -width, -cluster_id) %>%
+    # remove split lift overs
+    dplyr::filter(!name %in% name[duplicated(name)])
+  
+  return(bed_converted)
+}
+```
+
+```{r revised read positions}
+# function to extract interactions that overlap with a gene's TSS - with wiggle room due to imprecision of interaction methods
+split_interactions_by_geneTSS <- function(interactions, gene_symbol, padding = 0){
+  # extract TSS for gene
+  print("loading hg38 genome...")
+  # import hg38 genome
+  ensembl <- useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl")
+  print("extracting gene TSS...")
+  # extract gene TSS
+  gene_TSS <- biomaRt::select(ensembl, 
+                              keys = gene_symbol,
+                              columns = c('external_gene_name','chromosome_name', 'transcription_start_site'),
+                              keytype = "external_gene_name") %>%
+    dplyr::mutate(transcription_start_site_w_padding = transcription_start_site + padding,
+                  chromosome_name = paste("chr", chromosome_name, sep = ""))
+  
+  ## check read 1
+  # find intersection between gene_TSS and interactions
+  print("checking read 1 for TSS overlap...")
+  interactions_TSS_intersect_R1 <- genome_intersect(x = interactions, y = gene_TSS, by = c("chr1" = "chromosome_name", "start1" = "transcription_start_site", "end1" = "transcription_start_site_w_padding"), mode = "left")
+  
+  ## check read 2
+  # find intersection between gene_TSS and interactions
+  print("checking read 2 for TSS overlap...")
+  interactions_TSS_intersect_R2 <- genome_intersect(x = interactions, y = gene_TSS, by = c("chr2" = "chromosome_name", "start2" = "transcription_start_site", "end2" = "transcription_start_site_w_padding"), mode = "left")
+  # combine data and format data
+  interactions_TSS_intersect <- bind_rows(interactions_TSS_intersect_R1,interactions_TSS_intersect_R2) %>%
+    dplyr::mutate(name = row_number(),
+                  score = 1,
+                  strand1 = "*",
+                  strand2= "*") %>%
+    dplyr::select(chr1, start1, end1, chr2, start2, end2, name, score, strand1, strand2, everything())
+  
+  return(interactions_TSS_intersect)
+}
+
+# function to extract interactions that overlap with a gene's TSS - with wiggle room due to imprecision of interaction methods
+# with bound to restrict TSS
+split_interactions_by_geneTSS_restricted <- function(interactions, gene_symbol, padding = 0, TSS_lim_1, TSS_lim_2){
+  # extract TSS for gene
+  print("loading hg38 genome...")
+  # import hg38 genome
+  ensembl <- useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl")
+  print("extracting gene TSS...")
+  # extract gene TSS
+  gene_TSS <- biomaRt::select(ensembl, 
+                              keys = gene_symbol,
+                              columns = c('external_gene_name','chromosome_name', 'transcription_start_site'),
+                              keytype = "external_gene_name") %>%
+    dplyr::mutate(transcription_start_site_w_padding = transcription_start_site + padding,
+                  chromosome_name = paste("chr", chromosome_name, sep = "")) %>%
+    dplyr::filter(transcription_start_site > TSS_lim_1, transcription_start_site_w_padding < TSS_lim_2)
+  
+  ## check read 1
+  # find intersection between gene_TSS and interactions
+  print("checking read 1 for TSS overlap...")
+  interactions_TSS_intersect_R1 <- genome_intersect(x = interactions, y = gene_TSS, by = c("chr1" = "chromosome_name", "start1" = "transcription_start_site", "end1" = "transcription_start_site_w_padding"), mode = "left")
+  
+  ## check read 2
+  # find intersection between gene_TSS and interactions
+  print("checking read 2 for TSS overlap...")
+  interactions_TSS_intersect_R2 <- genome_intersect(x = interactions, y = gene_TSS, by = c("chr2" = "chromosome_name", "start2" = "transcription_start_site", "end2" = "transcription_start_site_w_padding"), mode = "left")
+  # combine data and format data
+  interactions_TSS_intersect <- bind_rows(interactions_TSS_intersect_R1,interactions_TSS_intersect_R2) %>%
+    dplyr::mutate(name = row_number(),
+                  score = 1,
+                  strand1 = "*",
+                  strand2= "*") %>%
+    dplyr::select(chr1, start1, end1, chr2, start2, end2, name, score, strand1, strand2, everything())
+  
+  return(interactions_TSS_intersect)
+}
+
+# function to extract promoter and interactions in one longer format (not bedpe)
+# ths will be helpful in prioritizing and overlapping targets
+parse_interactions_by_geneTSS <- function(interactions, gene_symbol, padding = 0){
+  # extract TSS for gene
+  print("loading hg38 genome...")
+  # import hg38 genome
+  ensembl <- useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl")
+  print("extracting gene TSS...")
+  # extract gene TSS
+  gene_TSS <- biomaRt::select(ensembl, 
+                              keys = gene_symbol,
+                              columns = c('external_gene_name','chromosome_name', 'transcription_start_site'),
+                              keytype = "external_gene_name") %>%
+    dplyr::mutate(transcription_start_site_w_padding = transcription_start_site + padding,
+                  chromosome_name = paste("chr", chromosome_name, sep = ""),
+                  TSS_gene = gene_symbol)
+  
+  ## check read 1
+  # find intersection between gene_TSS and interactions - note this version will only pull out the interacting segment
+  print("checking read 1 for TSS overlap...")
+  interactions_TSS_intersect_R1 <- genome_intersect(x = interactions, y = gene_TSS, by = c("chr1" = "chromosome_name", "start1" = "transcription_start_site", "end1" = "transcription_start_site_w_padding"), mode = "left") %>%
+    dplyr::select(chr2, start2, end2) %>%
+    dplyr::rename(chr = chr2, start = start2, end = end2) %>%
+    dplyr::mutate(TSS_gene = gene_symbol)
+  
+  
+  ## check read 2
+  # find intersection between gene_TSS and interactions
+  print("checking read 2 for TSS overlap...")
+  interactions_TSS_intersect_R2 <- genome_intersect(x = interactions, y = gene_TSS, by = c("chr2" = "chromosome_name", "start2" = "transcription_start_site", "end2" = "transcription_start_site_w_padding"), mode = "left") %>% 
+    dplyr::select(chr1, start1, end1) %>%
+    dplyr::rename(chr = chr1, start = start1, end = end1) %>%
+    dplyr::mutate(TSS_gene = gene_symbol)
+  
+  # combine data and format data
+  interactions_TSS_intersect <- bind_rows(interactions_TSS_intersect_R1,interactions_TSS_intersect_R2) %>%
+    distinct() %>%
+    dplyr::mutate(name = row_number()) %>%
+    dplyr::select(chr, start, end, name, TSS_gene)
+  
+  return(interactions_TSS_intersect)
+}
+
+# this function generates bedpe from interactions annotated by gene ID - this is helpful for non-coding RNA
+#eg SCN3A	2	165619546	165624430
+gene_ID_interaction_to_bedpe <- function(df){
+  print("loading hg38 genome...")
+  # import hg38 genome
+  ensembl <- useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl")
+  print("extracting gene IDs: assumes column name is `gene_ID`")
+  # extracting gene IDs
+  gene_IDs <- as.character(unique(df$gene_ID))
+  print("generating gene TSS coordinates")
+  # convert to gene TSS - picks transcript that has TSS closest to gene start site (largest transcript typically)
+  gene_TSS <- biomaRt::select(ensembl, 
+                              keys = gene_IDs,
+                              columns = c('external_gene_name', 'ensembl_gene_id','chromosome_name', 'start_position', 'transcription_start_site'),
+                              keytype = "ensembl_gene_id") %>%
+    dplyr::mutate(seq_diff = abs(as.numeric(start_position) - as.numeric(transcription_start_site))) %>%
+    dplyr::group_by(external_gene_name) %>%
+    dplyr::arrange(desc(seq_diff)) %>%
+    dplyr::top_n(n=1) %>%
+    dplyr::select(-c(seq_diff, start_position))
+  print("adding gene TSS information")
+  # add gene TSS information
+  interaction_bedpe <- full_join(df, gene_TSS, by = c("gene_ID" = "ensembl_gene_id")) %>%
+    dplyr::mutate(transcription_start_site_50bp = transcription_start_site + 50) %>%
+    dplyr::mutate(chromosome_name = paste("chr",chromosome_name, sep = ""),
+                  chromosome = paste("chr",chromosome, sep = ""),
+                  name = row_number(),
+                  score = 1,
+                  strand1 = "*",
+                  strand2= "*") %>%
+    dplyr::select(chromosome_name, transcription_start_site, transcription_start_site_50bp, chromosome, start, end, name, score, strand1, strand2, everything())
+  return(interaction_bedpe)
+}
+
+
+gene_symbol_interaction_to_bedpe <- function(df){
+  print("loading hg38 genome...")
+  # import hg38 genome
+  ensembl <- useMart(biomart="ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl")
+  print("extracting gene symbols: assumes column name is `gene`")
+  # extracting gene symbols
+  gene_symbols <- as.character(unique(df$gene))
+  print("generating gene TSS coordinates")
+  # convert to gene TSS - picks transcript that has TSS closest to gene start site (largest transcript typically)
+  gene_TSS <- biomaRt::select(ensembl, 
+                              keys = gene_symbols,
+                              columns = c('external_gene_name','chromosome_name', 'start_position', 'transcription_start_site'),
+                              keytype = "external_gene_name") %>%
+    dplyr::mutate(seq_diff = abs(as.numeric(start_position) - as.numeric(transcription_start_site))) %>%
+    dplyr::group_by(external_gene_name) %>%
+    dplyr::arrange(desc(seq_diff)) %>%
+    dplyr::top_n(n=1) %>%
+    dplyr::select(-c(seq_diff, start_position))
+  print("adding gene TSS information")
+  # add gene TSS information
+  interaction_bedpe <- full_join(df, gene_TSS, by = c("gene" = "external_gene_name")) %>%
+    dplyr::mutate(transcription_start_site_50bp = transcription_start_site + 50) %>%
+    dplyr::mutate(chromosome_name = paste("chr",chromosome_name, sep = ""),
+                  chromosome = paste("chr",chromosome, sep = ""),
+                  name = row_number(),
+                  score = 1,
+                  strand1 = "*",
+                  strand2= "*") %>%
+    dplyr::select(chromosome_name, transcription_start_site, transcription_start_site_50bp, chromosome, start, end, name, score, strand1, strand2, everything())
+  return(interaction_bedpe)
+}
+
+```
+
+
+# Main function for making annotations
+```{r, main annotation function}
+# function takes in a loci (so for a given gene look up the loci of interest)
+# list of databases:
+# interactions (must be formatted as bedpe)
+# epigenetic marks
+
+
+# note that this specific function is the most naive one - will just look show all annotation for a given region. Potentially could run into memory issues
+# Also note that we will be switching to hg38. Will pre-make hg38 versions since it seems wasteful otherwise
+loci_viewer <- function(chr, start = NULL, end = NULL, save_file, temp_dir){
+  
+  # set up initial values
+  # set up Gviz
+  # genome : "hg19" 
+  gen <- "hg38"
+  #Chromosme name : "chr2"
+  chr <- chr
+  # genome axis track
+  gtrack <- GenomeAxisTrack()
+  #Ideogram track
+  itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+  
+  
+  # gene models
+  # hg38
+  mart_hg38 <- useMart(biomart="ensembl", dataset="hsapiens_gene_ensembl")
+  # hg19
+  biomTrack_hg38 <- BiomartGeneRegionTrack(genome="hg38", chromosome=chr,
+                                           name="ENSEMBL", biomart=mart_hg38, stacking = "pack")
+
+  
+  # load data bases
+  Nott_interactions <- Nott_interaction_viewer(chr = chr,
+                                               start = start,
+                                               end = start,
+                                               temp_dir = temp_dir)
+  
+  
+  Song_interactions <- Song_interaction_viewer(chr = chr,
+                                               start = start,
+                                               end = end,
+                                               temp_dir = temp_dir)
+  
+  Nott_epigenome <- Nott_epigenome_viewer(chr = chr,
+                                          start = start,
+                                          end = end)
+  
+  Song_epigenome <- Song_epigenome_viewer(chr = chr,
+                                          start = start,
+                                          end = end)
+  
+  Nott_annotation <- Nott_annotation_viewer(chr = chr,
+                                            start = start,
+                                            end = end)
+  
+  # generate and save figure
+  png(filename = save_file, height = 1200, width = 1200)
+  fetal_adult_brain_interactions_and_annotations_plot <- plotTracks(list(
+    itrack,
+    gtrack,
+    Nott_interactions$Neuron_Interactome_adult_Nott_track,
+    Nott_interactions$Oligo_Interactome_adult_Nott_track,
+    Nott_interactions$Microglia_Interactome_adult_Nott_track,
+    # Song_interactions$fetal_brain_interaction_song_eN_track,
+    # Song_interactions$fetal_brain_interaction_song_iN_track,
+    # Song_interactions$fetal_brain_interaction_song_IPC_track,
+    # Song_interactions$fetal_brain_interaction_song_RG_track,
+    # Nott_epigenome$Nott_Adult_Neuron_H3K27Ac_track,
+    # Nott_epigenome$Nott_Adult_Neuron_ATAC_track,
+    # Nott_epigenome$Nott_Adult_Neuron_H3K4me3_track,
+    # Song_epigenome$fetal_brain_atac_eN_track,
+    # Song_epigenome$fetal_brain_atac_iN_track,
+    # Song_epigenome$fetal_brain_atac_IPC_track,
+    # Song_epigenome$fetal_brain_atac_RG_track,
+    # Nott_annotation$Nott_neuronal_enhancers_track,
+    # Nott_annotation$Nott_oligo_enhancers_track,
+    # Nott_annotation$Nott_microglia_enhancers_track,
+    # Nott_annotation$Nott_astrocytes_enhancers_track,
+    # Nott_annotation$Nott_neuronal_promoters_track,
+    biomTrack_hg38), 
+    transcriptAnnotation = "symbol", 
+    sizes=c(1,1,1,1,1,1),#1,1,2,2,2,2,2,2,2,2,2,2,2,2,3),
+    from=start,
+    to=end)
+  dev.off()
+  rm(fetal_adult_brain_interactions_and_annotations_plot)
+  
+}
+
+
+
+
+
+######################
+# pre loaded version (allows for more flexible look)
+loci_viewer_preloaded <- function(chr, start = NULL, end = NULL, save_file, temp_dir, biomTrack_hg38, Nott_interactions, Song_interactions, Nott_epigenome, Song_epigenome, Nott_annotation){
+  
+  # set up initial values
+  # set up Gviz
+  # genome : "hg19" 
+  gen <- "hg38"
+  #Chromosme name : "chr2"
+  chr <- chr
+  # genome axis track
+  gtrack <- GenomeAxisTrack()
+  #Ideogram track
+  itrack <- IdeogramTrack(genome = gen, chromosome = chr)
+  
+  
+  # gene models
+  biomTrack_hg38 <- biomTrack_hg38
+  
+  # load data bases
+  Nott_interactions <- Nott_interactions
+  
+  Song_interactions <- Song_interactions
+  
+  #Nott_epigenome <- Nott_epigenome
+  
+  Song_epigenome <- Song_epigenome
+  
+  Nott_annotation <- Nott_annotation
+  
+
+  # generate and save figure
+  png(filename = save_file, height = 1200, width = 1200)
+  fetal_adult_brain_interactions_and_annotations_plot <- plotTracks(list(
+    itrack,
+    gtrack,
+    Nott_interactions$Neuron_Interactome_adult_Nott_track,
+    Nott_interactions$Oligo_Interactome_adult_Nott_track,
+    Nott_interactions$Microglia_Interactome_adult_Nott_track,
+    Song_interactions$fetal_brain_interaction_song_eN_track,
+    Song_interactions$fetal_brain_interaction_song_iN_track,
+    Song_interactions$fetal_brain_interaction_song_IPC_track,
+    Song_interactions$fetal_brain_interaction_song_RG_track,
+    # Nott_epigenome$Nott_Adult_Neuron_H3K27Ac_track,
+    # Nott_epigenome$Nott_Adult_Neuron_ATAC_track,
+    # Nott_epigenome$Nott_Adult_Neuron_H3K4me3_track,
+    #Song_epigenome$fetal_brain_atac_eN_track,
+    #Song_epigenome$fetal_brain_atac_iN_track,
+    #Song_epigenome$fetal_brain_atac_IPC_track,
+    #Song_epigenome$fetal_brain_atac_RG_track,
+    Nott_annotation$Nott_neuronal_enhancers_track,
+    Nott_annotation$Nott_oligo_enhancers_track,
+    Nott_annotation$Nott_microglia_enhancers_track,
+    Nott_annotation$Nott_astrocytes_enhancers_track,
+    Nott_annotation$Nott_neuronal_promoters_track,
+    biomTrack_hg38), 
+    transcriptAnnotation = "symbol", 
+    sizes=c(1,1,
+            1,1,1,
+            1,1,1,1,
+            1,1,1,1,1,
+            3),
+    from=start,
+    to=end)
+  dev.off()
+  rm(fetal_adult_brain_interactions_and_annotations_plot)
+  
+}
+
+
+Nott_interaction_viewer <- function(chr, start = NULL, end = NULL, temp_dir){
+  
+  # make temp directory if does not exist
+  dir.create(temp_dir)
+  #### Interactions
+  ### adult interaction data from Nott et al 
+  # all interactions
+  # Neuron
+  Neuron_Interactome_adult_Nott_pairs_processed_temp <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Neuron_Interactome_adult_Nott_pairs_hg38.bedpe",
+                                                                 col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2")) %>% 
+    dplyr::filter((chr1 == !!chr & chr2 == !!chr), (start1 >= !!start & end1 <= !!end) | (start2 >= !!start & end2 <= !!end))
+  
+  # if empty, just make empty track
+  if(dim(Neuron_Interactome_adult_Nott_pairs_processed_temp)[1] == 0) {
+    
+    Neuron_Interactome_adult_Nott_pairs_processed <- GenomicInteractions()
+    seqlevels(Neuron_Interactome_adult_Nott_pairs_processed) <- chr
+  } else {
+    
+    write_tsv(Neuron_Interactome_adult_Nott_pairs_processed_temp, path = file.path(temp_dir,"Neuron_Interactome_adult_Nott_pairs_processed_temp.bedpe"), col_names = FALSE)
+    
+    Neuron_Interactome_adult_Nott_pairs_processed <- makeGenomicInteractionsFromFile(file.path(temp_dir, "Neuron_Interactome_adult_Nott_pairs_processed_temp.bedpe"), type = "bedpe")
+  }
+  Neuron_Interactome_adult_Nott_track <- InteractionTrack(Neuron_Interactome_adult_Nott_pairs_processed, 
+                                                          name = "Nott neuron interactome", 
+                                                          chromosome = chr)
+  rm(Neuron_Interactome_adult_Nott_pairs_processed)
+  rm(Neuron_Interactome_adult_Nott_pairs_processed_temp)
+  
+  # Oligo
+  Oligo_Interactome_adult_Nott_pairs_processed_temp <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Oligo_Interactome_adult_Nott_pairs_hg38.bedpe",
+                                                                col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2")) %>% 
+    dplyr::filter((chr1 == !!chr & chr2 == !!chr), (start1 >= !!start & end1 <= !!end) | (start2 >= !!start & end2 <= !!end))
+  
+  # if empty, just make empty track
+  if(dim(Oligo_Interactome_adult_Nott_pairs_processed_temp)[1] == 0) {
+    
+    Oligo_Interactome_adult_Nott_pairs_processed <- GenomicInteractions()
+    seqlevels(Oligo_Interactome_adult_Nott_pairs_processed) <- chr
+  } else {
+    
+    write_tsv(Oligo_Interactome_adult_Nott_pairs_processed_temp, path = file.path(temp_dir,"Oligo_Interactome_adult_Nott_pairs_processed_temp.bedpe"), col_names = FALSE)
+    
+    Oligo_Interactome_adult_Nott_pairs_processed <- makeGenomicInteractionsFromFile(file.path(temp_dir, "Oligo_Interactome_adult_Nott_pairs_processed_temp.bedpe"), type = "bedpe")
+  }
+  Oligo_Interactome_adult_Nott_track <- InteractionTrack(Oligo_Interactome_adult_Nott_pairs_processed, 
+                                                         name = "Nott Oligo interactome", 
+                                                         chromosome = chr)
+  rm(Oligo_Interactome_adult_Nott_pairs_processed)
+  rm(Oligo_Interactome_adult_Nott_pairs_processed_temp)
+  # Microglia
+  Microglia_Interactome_adult_Nott_pairs_processed_temp <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Microglia_Interactome_adult_Nott_pairs_hg38.bedpe",
+                                                                    col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2")) %>% 
+    dplyr::filter((chr1 == !!chr & chr2 == !!chr), (start1 >= !!start & end1 <= !!end) | (start2 >= !!start & end2 <= !!end))
+  
+  
+  # if empty, just make empty track
+  if(dim(Microglia_Interactome_adult_Nott_pairs_processed_temp)[1] == 0) {
+    
+    Microglia_Interactome_adult_Nott_pairs_processed <- GenomicInteractions()
+    seqlevels(Microglia_Interactome_adult_Nott_pairs_processed) <- chr
+  } else {
+    
+    write_tsv(Microglia_Interactome_adult_Nott_pairs_processed_temp, path = file.path(temp_dir,"Microglia_Interactome_adult_Nott_pairs_processed_temp.bedpe"), col_names = FALSE)
+    
+    Microglia_Interactome_adult_Nott_pairs_processed <- makeGenomicInteractionsFromFile(file.path(temp_dir, "Microglia_Interactome_adult_Nott_pairs_processed_temp.bedpe"), type = "bedpe")
+  }
+  Microglia_Interactome_adult_Nott_track <- InteractionTrack(Microglia_Interactome_adult_Nott_pairs_processed, 
+                                                             name = "Nott Microglia interactome", 
+                                                             chromosome = chr)
+  rm(Microglia_Interactome_adult_Nott_pairs_processed)
+  rm(Microglia_Interactome_adult_Nott_pairs_processed_temp)
+  
+  return(list(Neuron_Interactome_adult_Nott_track = Neuron_Interactome_adult_Nott_track, Oligo_Interactome_adult_Nott_track = Oligo_Interactome_adult_Nott_track, Microglia_Interactome_adult_Nott_track = Microglia_Interactome_adult_Nott_track))
+}
+
+Song_interaction_viewer <- function(chr, start = NULL, end = NULL, temp_dir){
+  # create temp directory if it doesn't exist
+  dir.create(temp_dir)
+  ### Fetal brain interaction (Song et al)
+  # eN
+  fetal_brain_interaction_song_eN_pairs_processed_temp <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_eN.hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2", "count", "expected", "fdr")) %>%
+    dplyr::filter((chr1 == !!chr & chr2 == !!chr), (start1 >= !!start & end1 <= !!end) | (start2 >= !!start & end2 <= !!end))
+  
+  # if empty, just make empty track
+  if(dim(fetal_brain_interaction_song_eN_pairs_processed_temp)[1] == 0) {
+    fetal_brain_interaction_song_eN_pairs_processed <- GenomicInteractions()
+    seqlevels(fetal_brain_interaction_song_eN_pairs_processed) <- chr
+  } else {
+    print(" fetal_brain_interaction_song_eN_pairs_processed_temp not empty")  
+    write_tsv(fetal_brain_interaction_song_eN_pairs_processed_temp, path = file.path(temp_dir, "fetal_brain_interaction_song_eN_pairs_processed_temp"), col_names = FALSE)
+    
+    fetal_brain_interaction_song_eN_pairs_processed <- makeGenomicInteractionsFromFile(file.path(temp_dir, "fetal_brain_interaction_song_eN_pairs_processed_temp"), type = "bedpe")
+  }
+  fetal_brain_interaction_song_eN_track <- InteractionTrack(fetal_brain_interaction_song_eN_pairs_processed, name = "Fetal eN song", 
+                                                            chromosome = chr)
+  
+  # iN
+  fetal_brain_interaction_song_iN_pairs_processed_temp <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_iN.hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2", "count", "expected", "fdr")) %>%
+    dplyr::filter((chr1 == !!chr & chr2 == !!chr), (start1 >= !!start & end1 <= !!end) | (start2 >= !!start & end2 <= !!end))
+  
+  # if empty, just make empty track
+  if(dim(fetal_brain_interaction_song_iN_pairs_processed_temp)[1] == 0) {
+    
+    fetal_brain_interaction_song_iN_pairs_processed <- GenomicInteractions()
+    seqlevels(fetal_brain_interaction_song_iN_pairs_processed) <- chr
+  } else {
+    
+    write_tsv(fetal_brain_interaction_song_iN_pairs_processed_temp, path = file.path(temp_dir, "fetal_brain_interaction_song_iN_pairs_processed_temp"), col_names = FALSE)
+    
+    fetal_brain_interaction_song_iN_pairs_processed <- makeGenomicInteractionsFromFile(file.path(temp_dir, "fetal_brain_interaction_song_iN_pairs_processed_temp"), type = "bedpe")
+  }
+  fetal_brain_interaction_song_iN_track <- InteractionTrack(fetal_brain_interaction_song_iN_pairs_processed, name = "Fetal iN song", 
+                                                            chromosome = chr)
+  
+  # IPC
+  fetal_brain_interaction_song_IPC_pairs_processed_temp <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_IPC.hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2", "count", "expected", "fdr")) %>%
+    dplyr::filter((chr1 == !!chr & chr2 == !!chr), (start1 >= !!start & end1 <= !!end) | (start2 >= !!start & end2 <= !!end))
+  
+  # if empty, just make empty track
+  if(dim(fetal_brain_interaction_song_IPC_pairs_processed_temp)[1] == 0) {
+    
+    fetal_brain_interaction_song_IPC_pairs_processed <- GenomicInteractions()
+    seqlevels(fetal_brain_interaction_song_IPC_pairs_processed) <- chr
+  } else {
+    
+    write_tsv(fetal_brain_interaction_song_IPC_pairs_processed_temp, path = file.path(temp_dir, "fetal_brain_interaction_song_IPC_pairs_processed_temp"), col_names = FALSE)
+    
+    fetal_brain_interaction_song_IPC_pairs_processed <- makeGenomicInteractionsFromFile(file.path(temp_dir, "fetal_brain_interaction_song_IPC_pairs_processed_temp"), type = "bedpe")
+    
+  }
+  fetal_brain_interaction_song_IPC_track <- InteractionTrack(fetal_brain_interaction_song_IPC_pairs_processed, name = "Fetal IPC song", 
+                                                             chromosome = chr)
+  
+  # RG
+  fetal_brain_interaction_song_RG_pairs_processed_temp <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_RG.hg38.bedpe", col_names = c("chr1", "start1", "end1", "chr2", "start2", "end2", "name", "score", "strand1", "strand2", "count", "expected", "fdr")) %>%
+    dplyr::filter((chr1 == !!chr & chr2 == !!chr), (start1 >= !!start & end1 <= !!end) | (start2 >= !!start & end2 <= !!end))
+  
+  # if empty, just make empty track
+  if(dim(fetal_brain_interaction_song_RG_pairs_processed_temp)[1] == 0) {
+    
+    fetal_brain_interaction_song_RG_pairs_processed <- GenomicInteractions()
+    seqlevels(fetal_brain_interaction_song_RG_pairs_processed) <- chr
+  } else {
+    
+    write_tsv(fetal_brain_interaction_song_RG_pairs_processed_temp, path = file.path(temp_dir, "fetal_brain_interaction_song_RG_pairs_processed_temp"), col_names = FALSE)
+    
+    fetal_brain_interaction_song_RG_pairs_processed <- makeGenomicInteractionsFromFile(file.path(temp_dir, "fetal_brain_interaction_song_RG_pairs_processed_temp"), type = "bedpe")
+    
+  }
+  fetal_brain_interaction_song_RG_track <- InteractionTrack(fetal_brain_interaction_song_RG_pairs_processed, name = "Fetal RG song", 
+                                                            chromosome = chr)
+  
+  rm(fetal_brain_interaction_song_eN_pairs_processed, fetal_brain_interaction_song_iN_pairs_processed, fetal_brain_interaction_song_IPC_pairs_processed, fetal_brain_interaction_song_RG_pairs_processed)
+  rm(fetal_brain_interaction_song_eN_pairs_processed_temp, fetal_brain_interaction_song_iN_pairs_processed_temp, fetal_brain_interaction_song_IPC_pairs_processed_temp, fetal_brain_interaction_song_RG_pairs_processed_temp)
+  
+  return(list(fetal_brain_interaction_song_eN_track = fetal_brain_interaction_song_eN_track, fetal_brain_interaction_song_iN_track = fetal_brain_interaction_song_iN_track, fetal_brain_interaction_song_IPC_track = fetal_brain_interaction_song_IPC_track, fetal_brain_interaction_song_RG_track = fetal_brain_interaction_song_RG_track))
+}
+
+Nott_epigenome_viewer <- function(chr, start = NULL, end = NULL){
+  # prepare for liftover (for some data tracks)
+  hub <- AnnotationHub()
+  chain_hg19_to_hg38 <- query(hub, 'hg19ToHg38')[[1]]
+  
+  
+  
+  #### Histone marks + Accessibility
+  # Nott et al, Adult Brain (Neurons only for now)
+  Data_range <- GRanges(seqnames = chr,
+                        ranges = IRanges(start = start, end  = end))
+  Nott_Adult_Neuron_H3K27Ac <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/BigWig/human_NEUNnuclei_H3K27ac_epilepsy_pooled_hg19.ucsc.bigWig", which = Data_range)
+  Nott_Adult_Neuron_ATAC <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/BigWig/human_NEUNnuclei_atac_epilepsy_pooled_hg19.ucsc.bigWig", which = Data_range)
+  Nott_Adult_Neuron_H3K4me3 <- import("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/BigWig/human_NEUNnuclei_H3K4me3_epilepsy_hg19.ucsc.bigWig", which = Data_range) 
+  
+  # convert to Gviz track
+  Nott_Adult_Neuron_H3K27Ac_track <- DataTrack(Nott_Adult_Neuron_H3K27Ac, name = "Nott Adult Neuron H3K27Ac", col = "#E74C3C", cex = 0.1) %>%
+    Gvis_liftOver(., chain_hg19_to_hg38)
+  Nott_Adult_Neuron_ATAC_track <- DataTrack(Nott_Adult_Neuron_ATAC, name = "Nott Adult Neuron ATAC", col = "#3498DB", cex = 0.1) %>%
+    Gvis_liftOver(., chain_hg19_to_hg38)
+  Nott_Adult_Neuron_H3K4me3_track <- DataTrack(Nott_Adult_Neuron_H3K4me3, name = "Nott Adult Neuron H3K4me3", col = "#3eb110", cex = 0.1) %>%
+    Gvis_liftOver(., chain_hg19_to_hg38)
+  
+  rm(Nott_Adult_Neuron_H3K27Ac, Nott_Adult_Neuron_ATAC, Nott_Adult_Neuron_H3K4me3)
+  
+  return(list(Nott_Adult_Neuron_H3K27Ac_track = Nott_Adult_Neuron_H3K27Ac_track, Nott_Adult_Neuron_ATAC_track = Nott_Adult_Neuron_ATAC_track, Nott_Adult_Neuron_H3K4me3_track = Nott_Adult_Neuron_H3K4me3_track))
+}
+
+Song_epigenome_viewer <- function(chr, start = NULL, end = NULL){
+  # Song et al (Accessibility)
+  fetal_brain_atac_eN <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_eN.hg38.bed",
+                                  col_names = c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>% 
+    dplyr::mutate(strand = "*")  %>%
+  makeGRangesFromDataFrame(., keep.extra.columns = TRUE)
+  fetal_brain_atac_iN <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_iN.hg38.bed",
+                                  col_names = c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>% 
+    dplyr::mutate(strand = "*")  %>%
+  makeGRangesFromDataFrame(., keep.extra.columns = TRUE)
+  fetal_brain_atac_IPC <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_eN.hg38.bed",
+                                   col_names = c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>% 
+    dplyr::mutate(strand = "*") %>%
+  makeGRangesFromDataFrame(., keep.extra.columns = TRUE)
+  
+  fetal_brain_atac_RG <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_eN.hg38.bed",
+                                  col_names = c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>% 
+    dplyr::mutate(strand = "*") %>%
+  makeGRangesFromDataFrame(., keep.extra.columns = TRUE)
+  
+  
+  fetal_brain_atac_eN_track <- DataTrack(fetal_brain_atac_eN, name = "fetal_brain_atac_eN", col = "#E74C3C", cex = 0.1, genome = "hg38")
+  fetal_brain_atac_iN_track <- DataTrack(fetal_brain_atac_iN, name = "fetal_brain_atac_iN", col = "#3498DB", cex = 0.1, genome = "hg38")
+  fetal_brain_atac_IPC_track <- DataTrack(fetal_brain_atac_IPC, name = "fetal_brain_atac_IPC", col = "#3eb110", cex = 0.1, genome = "hg38")
+  fetal_brain_atac_RG_track <- DataTrack(fetal_brain_atac_RG, name = "fetal_brain_atac_RG", col = "#E74C3C", cex = 0.1, genome = "hg38")
+  
+  rm(fetal_brain_atac_eN, fetal_brain_atac_iN, fetal_brain_atac_IPC, fetal_brain_atac_RG)
+  
+  return(list(fetal_brain_atac_eN_track = fetal_brain_atac_eN_track, fetal_brain_atac_iN_track = fetal_brain_atac_iN_track, fetal_brain_atac_IPC_track = fetal_brain_atac_IPC_track, fetal_brain_atac_RG_track = fetal_brain_atac_RG_track))
+}
+
+
+Nott_annotation_viewer <- function(chr, start = NULL, end = NULL){
+  
+  # Functional Annotations
+  Nott_neuronal_enhancers <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_neuronal_enhancers_hg38.bed", 
+                                      col_names = c("chr", "start", "end", "name", "score", "strand")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>%
+  makeGRangesFromDataFrame(.)
+  Nott_oligo_enhancers <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_oligo_enhancers_hg38.bed", 
+                                   col_names = c("chr", "start", "end", "name", "score", "strand")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>%
+  makeGRangesFromDataFrame(.)
+  Nott_microglia_enhancers <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_microglia_enhancers_hg38.bed", 
+                                       col_names = c("chr", "start", "end", "name", "score", "strand")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>%
+  makeGRangesFromDataFrame(.)
+  Nott_astrocytes_enhancers <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_astrocytes_enhancers_hg38.bed", 
+                                        col_names = c("chr", "start", "end", "name", "score", "strand")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>%
+  makeGRangesFromDataFrame(.)
+  
+  Nott_neuronal_enhancers_track <- AnnotationTrack(Nott_neuronal_enhancers, name = "Nott neuronal enhancers", col = "#E74C3C")
+  Nott_oligo_enhancers_track <- AnnotationTrack(Nott_oligo_enhancers, name = "Nott oligo enhancers", col = "#3498DB")
+  Nott_microglia_enhancers_track <- AnnotationTrack(Nott_microglia_enhancers, name = "Nott microglia enhancers", col = "#3eb110")
+  Nott_astrocytes_enhancers_track <- AnnotationTrack(Nott_astrocytes_enhancers, name = "Nott astrocytes enhancers", col = "#E74C3C")
+  
+  rm(Nott_neuronal_enhancers, Nott_oligo_enhancers, Nott_microglia_enhancers, Nott_astrocytes_enhancers)
+  # include promoters
+  Nott_neuronal_promoters <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_neuronal_promoters_hg38.bed", 
+                                      col_names = c("chr", "start", "end", "name", "score", "strand")) %>%
+    dplyr::filter(chr == !!chr, start >= !!start, end <= !!end) %>%
+    makeGRangesFromDataFrame(.)
+  Nott_neuronal_promoters_track <- AnnotationTrack(Nott_neuronal_promoters, name = "Nott promoters enhancers") 
+  
+  rm(Nott_neuronal_promoters)
+  
+  return(list(Nott_neuronal_enhancers_track = Nott_neuronal_enhancers_track, Nott_oligo_enhancers_track = Nott_oligo_enhancers_track, Nott_microglia_enhancers_track = Nott_microglia_enhancers_track, Nott_astrocytes_enhancers_track = Nott_astrocytes_enhancers_track, Nott_neuronal_promoters_track = Nott_neuronal_promoters_track))
+}
+
+
+```
+
+
+
