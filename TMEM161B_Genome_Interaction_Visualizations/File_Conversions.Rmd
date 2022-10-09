@@ -1,0 +1,352 @@
+---
+title: "File Conversions"
+output: html_notebook
+---
+
+This notebook is for code used to perform file conversions for reference files. Allows for note keeping as well as cleaner coding for important file conversions
+
+```{r, load necessary libraries}
+library(tidyverse)
+library(tidygenomics)
+library(ggpubr)
+library(Gviz)
+library(GenomicRanges)
+library(biomaRt)
+library(AnnotationHub)
+library(rtracklayer)
+library(GenomicInteractions)
+```
+
+# Custom Functions
+
+```{r}
+# liftOver Gviz to different chain
+Gvis_liftOver <- function(biomartGeneRegionTrackdf, chain){
+  converted_df <- liftOver(ranges(biomartGeneRegionTrackdf), chain)
+  converted_df <- unlist(converted_df)
+  converted_track <- GeneRegionTrack(converted_df)
+  return(converted_track)
+}
+
+# liftOver ranges to different chain
+ranges_liftOver <- function(ranges, chain){
+  converted_df <- liftOver(ranges, chain)
+  converted_df <- unlist(converted_df)
+  return(converted_df)
+}
+
+
+# liftover bed
+# note that this function will merge elements that are up to 100 bp apart. This is a rough smoothing approach since rtracklayer liftover results in fragmented liftover otherwise
+bed_liftOver <- function(bed_df, chain){
+  # perform liftover individually
+  bed_converted <- liftOver(
+    bed_df %>%
+    makeGRangesFromDataFrame(seqnames.field=c("chr"),
+                             start.field="start",
+                             end.field="end",
+                             keep.extra.columns = TRUE),
+    chain) %>%
+    unlist() %>%
+    as_tibble() %>%
+    # merge intersecting segments
+    genome_cluster(by = c("seqnames", "start", "end"), max_distance = 100) %>% 
+    group_by(across(-c("start", "end"))) %>%
+    summarize(start = min(start), end = max(end)) %>%
+    dplyr::rename(chr = seqnames,
+                  start = start,
+                  end = end) %>%
+    ungroup() %>%
+    dplyr::select(chr, start, end, name, score, strand, everything(), -width, -cluster_id) %>%
+    # remove split lift overs
+    dplyr::filter(!name %in% name[duplicated(name)])
+  
+  return(bed_converted)
+}
+
+
+# liftover bedpe
+# note that this function will merge elements that are up to 100 bp apart. This is a rough smoothing approach since rtracklayer liftover results in fragmented liftover otherwise
+bedpe_liftOver <- function(bedpe_df, chain){
+  # extract information
+  bed_info <- bedpe_df %>%
+    dplyr::select(-c(chr1, start1, end1, chr2, start2, end2))
+  
+  # first split bedpe into two separate dfs
+  bed_part_1 <- bedpe_df %>%
+    dplyr::select(-c(chr2, start2, end2))
+  bed_part_2 <- bedpe_df %>%
+    dplyr::select(-c(chr1, start1, end1))
+  
+  
+  # perform liftover individually
+  bed_part_1_liftOver <- liftOver(
+    bed_part_1 %>%
+    makeGRangesFromDataFrame(seqnames.field=c("chr1"),
+                             start.field="start1",
+                             end.field="end1",
+                             keep.extra.columns = TRUE),
+    chain) %>%
+    unlist() %>%
+    as_tibble() %>%
+    # merge intersecting segments
+    genome_cluster(by = c("seqnames", "start", "end"), max_distance = 100) %>% 
+    group_by(seqnames, name, cluster_id) %>% 
+    summarize(start = min(start), end = max(end)) %>%
+    dplyr::rename(chr1 = seqnames,
+                  start1 = start,
+                  end1 = end) %>%
+    dplyr::select(chr1, start1, end1, name)
+                             
+  bed_part_2_liftOver <- liftOver(
+    bed_part_2 %>%
+    makeGRangesFromDataFrame(seqnames.field=c("chr2"),
+                             start.field="start2",
+                             end.field="end2",
+                             keep.extra.columns = TRUE),
+    chain) %>%
+    unlist() %>%
+    as_tibble() %>%
+    # merge intersecting segments
+    genome_cluster(by = c("seqnames", "start", "end"), max_distance = 100) %>% 
+    group_by(seqnames, name, cluster_id) %>% 
+    summarize(start = min(start), end = max(end)) %>%
+    dplyr::rename(chr2 = seqnames,
+                  start2 = start,
+                  end2 = end)
+  
+  
+  bedpe_liftOver_ranges <- full_join(bed_part_1_liftOver, bed_part_2_liftOver, by = c("name" = "name")) %>%
+    full_join(., bed_info, by = c("name" = "name")) %>%
+    dplyr::select(chr1, start1, end1, chr2, start2, end2, name, score, strand1, strand2, everything(), -cluster_id) %>%
+    # remove na
+    drop_na() %>%
+    # remove split lift overs
+    dplyr::filter(!name %in% name[duplicated(name)])
+
+  return(bedpe_liftOver_ranges)
+}
+
+```
+
+
+# conversions prep
+```{r, prepare for liftover}
+# prepare for liftover
+hub <- AnnotationHub()
+chain_hg19_to_hg38 <- query(hub, 'hg19ToHg38')[[1]]
+chain_hg38_to_hg19 <- query(hub, 'hg38ToHg19')[[1]]
+
+```
+
+
+```{r, Nott et al conversions}
+## Nott adult brain conversions
+# Neurons
+Neuron_Interactome_adult_Nott_pairs_hg19 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/Nott_Neuron_Interactome.txt") %>%
+  dplyr::mutate(name = row_number(),
+                strand1 =  "*",
+                strand2 = "*") %>%
+  dplyr::rename(score = count) %>%
+  dplyr::select(chr1, start1, end1, chr2, start2, end2, name, score, strand1, strand2)
+
+Neuron_Interactome_adult_Nott_pairs_hg38 <- Neuron_Interactome_adult_Nott_pairs_hg19 %>%
+  bedpe_liftOver(., chain_hg19_to_hg38)
+
+# Microglia
+Microglia_Interactome_adult_Nott_pairs_hg19 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/Nott_Microglia_Interactome.txt") %>%
+  dplyr::mutate(name = row_number(),
+                strand1 =  "*",
+                strand2 = "*") %>%
+  dplyr::rename(score = count) %>%
+  dplyr::select(chr1, start1, end1, chr2, start2, end2, name, score, strand1, strand2)
+
+Microglia_Interactome_adult_Nott_pairs_hg38 <- Microglia_Interactome_adult_Nott_pairs_hg19 %>%
+  bedpe_liftOver(., chain_hg19_to_hg38) 
+
+# Oligodendrocytes
+Oligo_Interactome_adult_Nott_pairs_hg19 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/Nott_Oligo_Interactome.txt") %>%
+  dplyr::mutate(name = row_number(),
+                strand1 =  "*",
+                strand2 = "*") %>%
+  dplyr::rename(score = count) %>%
+  dplyr::select(chr1, start1, end1, chr2, start2, end2, name, score, strand1, strand2)
+
+Oligo_Interactome_adult_Nott_pairs_hg38 <- Oligo_Interactome_adult_Nott_pairs_hg19 %>%
+  bedpe_liftOver(., chain_hg19_to_hg38)
+
+write_tsv(Neuron_Interactome_adult_Nott_pairs_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Neuron_Interactome_adult_Nott_pairs_hg19.bedpe", col_names = FALSE)
+write_tsv(Neuron_Interactome_adult_Nott_pairs_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Neuron_Interactome_adult_Nott_pairs_hg38.bedpe", col_names = FALSE)
+
+write_tsv(Microglia_Interactome_adult_Nott_pairs_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Microglia_Interactome_adult_Nott_pairs_hg19.bedpe", col_names = FALSE)
+write_tsv(Microglia_Interactome_adult_Nott_pairs_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Microglia_Interactome_adult_Nott_pairs_hg38.bedpe", col_names = FALSE)
+
+write_tsv(Oligo_Interactome_adult_Nott_pairs_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Oligo_Interactome_adult_Nott_pairs_hg19.bedpe", col_names = FALSE)
+write_tsv(Oligo_Interactome_adult_Nott_pairs_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Oligo_Interactome_adult_Nott_pairs_hg38.bedpe", col_names = FALSE)
+```
+
+
+```{r, Nott et al adult brain functional annotation conversions}
+Nott_neuronal_enhancers_hg19 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/Nott_Neuron_Enhancers.txt") %>%
+  dplyr::mutate(name = row_number(),
+                score = 1000,
+                strand = "*")
+
+Nott_neuronal_enhancers_hg38 <- Nott_neuronal_enhancers_hg19 %>%
+  bed_liftOver(., chain_hg19_to_hg38)
+
+Nott_oligo_enhancers_hg19 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/Nott_Oligo_Enhancers.txt") %>%
+  dplyr::mutate(name = row_number(),
+                score = 1000,
+                strand = "*")
+
+Nott_oligo_enhancers_hg38 <- Nott_oligo_enhancers_hg19 %>%
+  bed_liftOver(., chain_hg19_to_hg38)
+
+Nott_microglia_enhancers_hg19 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/Nott_Microglia_Enhancers.txt") %>%
+  dplyr::mutate(name = row_number(),
+                score = 1000,
+                strand = "*")
+
+Nott_microglia_enhancers_hg38 <- Nott_microglia_enhancers_hg19 %>%
+  bed_liftOver(., chain_hg19_to_hg38)
+
+Nott_astrocytes_enhancers_hg19 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/Nott_Astrocyte_Enhancers.txt") %>%
+  dplyr::mutate(name = row_number(),
+                score = 1000,
+                strand = "*")
+
+Nott_astrocytes_enhancers_hg38 <- Nott_astrocytes_enhancers_hg19 %>%
+  bed_liftOver(., chain_hg19_to_hg38)
+
+# include promoters (at least for neurons)
+Nott_neuronal_promoters_hg19 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Single_Cell_Analysis/Nott_Interaction_ATAC_H3K27ac/Nott_Neuron_Promoters.txt") %>%
+  dplyr::mutate(name = row_number(),
+                score = 1000,
+                strand = "*")
+
+Nott_neuronal_promoters_hg38 <- Nott_neuronal_promoters_hg19 %>%
+  bed_liftOver(., chain_hg19_to_hg38)
+
+
+write_tsv(Nott_neuronal_enhancers_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_neuronal_enhancers_hg19.bed", col_names = FALSE)
+write_tsv(Nott_neuronal_enhancers_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_neuronal_enhancers_hg38.bed", col_names = FALSE)
+
+write_tsv(Nott_oligo_enhancers_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_oligo_enhancers_hg19.bed", col_names = FALSE)
+write_tsv(Nott_oligo_enhancers_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_oligo_enhancers_hg38.bed", col_names = FALSE)
+
+write_tsv(Nott_microglia_enhancers_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_microglia_enhancers_hg19.bed", col_names = FALSE)
+write_tsv(Nott_microglia_enhancers_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_microglia_enhancers_hg38.bed", col_names = FALSE)
+
+write_tsv(Nott_astrocytes_enhancers_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_astrocytes_enhancers_hg19.bed", col_names = FALSE)
+write_tsv(Nott_astrocytes_enhancers_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_astrocytes_enhancers_hg38.bed", col_names = FALSE)
+
+
+write_tsv(Nott_neuronal_promoters_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_neuronal_promoters_hg19.bed", col_names = FALSE)
+write_tsv(Nott_neuronal_promoters_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Nott_Adult_Brain_Data/Nott_neuronal_promoters_hg38.bed", col_names = FALSE)
+
+
+```
+
+
+
+```{r, Song et al Fetal brain convert to bedpe}
+## convert to bedpe
+# eN
+fetal_brain_interaction_song_eN_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/shen_bdbag_2019/data/embargo/shen/interactions/bulk/processed/peaks/eN.MAPS.peaks.txt") %>%
+    dplyr::mutate(name = row_number(),
+                  score =  count,
+                  strand1 = "*",
+                  strand2 = "*") %>%
+    dplyr::select(chr1:end2, name, score, strand1, strand2, count, expected, fdr)
+
+fetal_brain_interaction_song_eN_hg19 <- fetal_brain_interaction_song_eN_hg38 %>%
+  bedpe_liftOver(., chain_hg38_to_hg19)
+
+# iN
+fetal_brain_interaction_song_iN_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/shen_bdbag_2019/data/embargo/shen/interactions/bulk/processed/peaks/iN.MAPS.peaks.txt") %>%
+    dplyr::mutate(name = row_number(),
+                  score =  count,
+                  strand1 = "*",
+                  strand2 = "*") %>%
+    dplyr::select(chr1:end2, name, score, strand1, strand2, count, expected, fdr)
+
+fetal_brain_interaction_song_iN_hg19 <- fetal_brain_interaction_song_iN_hg38 %>%
+  bedpe_liftOver(., chain_hg38_to_hg19)
+
+# IPC
+fetal_brain_interaction_song_IPC_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/shen_bdbag_2019/data/embargo/shen/interactions/bulk/processed/peaks/IPC.MAPS.peaks.txt") %>%
+    dplyr::mutate(name = row_number(),
+                  score =  count,
+                  strand1 = "*",
+                  strand2 = "*") %>%
+    dplyr::select(chr1:end2, name, score, strand1, strand2, count, expected, fdr)
+
+fetal_brain_interaction_song_IPC_hg19 <- fetal_brain_interaction_song_IPC_hg38 %>%
+  bedpe_liftOver(., chain_hg38_to_hg19)
+
+# RG
+fetal_brain_interaction_song_RG_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/shen_bdbag_2019/data/embargo/shen/interactions/bulk/processed/peaks/RG.MAPS.peaks.txt") %>%
+    dplyr::mutate(name = row_number(),
+                  score =  count,
+                  strand1 = "*",
+                  strand2 = "*") %>%
+    dplyr::select(chr1:end2, name, score, strand1, strand2, count, expected, fdr)
+
+fetal_brain_interaction_song_RG_hg19 <- fetal_brain_interaction_song_RG_hg38 %>%
+  bedpe_liftOver(., chain_hg38_to_hg19)
+
+
+write_tsv(fetal_brain_interaction_song_eN_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_eN.hg19.bedpe", col_names = FALSE)
+write_tsv(fetal_brain_interaction_song_eN_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_eN.hg38.bedpe", col_names = FALSE)
+
+write_tsv(fetal_brain_interaction_song_iN_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_iN.hg19.bedpe", col_names = FALSE)
+write_tsv(fetal_brain_interaction_song_iN_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_iN.hg38.bedpe", col_names = FALSE)
+
+write_tsv(fetal_brain_interaction_song_IPC_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_IPC.hg19.bedpe", col_names = FALSE)
+write_tsv(fetal_brain_interaction_song_IPC_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_IPC.hg38.bedpe", col_names = FALSE)
+
+write_tsv(fetal_brain_interaction_song_RG_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_RG.hg19.bedpe", col_names = FALSE)
+write_tsv(fetal_brain_interaction_song_RG_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_interaction_song_RG.hg38.bedpe", col_names = FALSE)
+
+
+```
+
+
+```{r, Song et al Fetal brain interaction and epigenetic data}
+fetal_brain_atac_eN_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/shen_bdbag_2019/data/embargo/shen/accessible_chromatin/processed/peaks/eN.ATAC-seq.narrowPeak", col_names = c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")) 
+
+fetal_brain_atac_eN_hg19 <- fetal_brain_atac_eN_hg38 %>%
+  bed_liftOver(., chain_hg38_to_hg19)
+
+
+fetal_brain_atac_iN_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/shen_bdbag_2019/data/embargo/shen/accessible_chromatin/processed/peaks/iN.ATAC-seq.narrowPeak", col_names = c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak"))
+
+fetal_brain_atac_iN_hg19 <- fetal_brain_atac_iN_hg38 %>%
+  bed_liftOver(., chain_hg38_to_hg19)
+
+fetal_brain_atac_IPC_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/shen_bdbag_2019/data/embargo/shen/accessible_chromatin/processed/peaks/IPC.ATAC-seq.narrowPeak", col_names = c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak"))
+
+fetal_brain_atac_IPC_hg19 <- fetal_brain_atac_IPC_hg38 %>%
+  bed_liftOver(., chain_hg38_to_hg19)
+
+fetal_brain_atac_RG_hg38 <- read_tsv("/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/shen_bdbag_2019/data/embargo/shen/accessible_chromatin/processed/peaks/RG.ATAC-seq.narrowPeak", col_names = c("chr", "start", "end", "name", "score", "strand", "signalValue", "pValue", "qValue", "peak")) 
+
+fetal_brain_atac_RG_hg19 <- fetal_brain_atac_RG_hg38 %>%
+  bed_liftOver(., chain_hg38_to_hg19)
+
+# save converted files
+write_tsv(fetal_brain_atac_eN_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_eN.hg19.bed", col_names = FALSE)
+write_tsv(fetal_brain_atac_eN_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_eN.hg38.bed", col_names = FALSE)
+
+write_tsv(fetal_brain_atac_iN_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_iN.hg19.bed", col_names = FALSE)
+write_tsv(fetal_brain_atac_iN_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_iN.hg38.bed", col_names = FALSE)
+
+write_tsv(fetal_brain_atac_IPC_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_IPC.hg19.bed", col_names = FALSE)
+write_tsv(fetal_brain_atac_IPC_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_IPC.hg38.bed", col_names = FALSE)
+
+write_tsv(fetal_brain_atac_RG_hg19, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_RG.hg19.bed", col_names = FALSE)
+write_tsv(fetal_brain_atac_RG_hg38, path = "/Users/tshin/Dropbox (CA Walsh Lab)/Walsh Lab/Scripts/Projects/Reference/Song_Fetal_Brain_Interactions/fetal_brain_atac_RG.hg38.bed", col_names = FALSE)
+
+```
+
