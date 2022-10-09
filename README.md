@@ -7,7 +7,7 @@ Descriptions of the code snippets are below:
 Visualization of genomic interaction datasets:
 - TMEM161B_interactions.Rmd (code with the actual visualization exploration)
 (https://oldmantae.github.io/Code_Sample/TMEM161B_Genome_Interaction_Visualizations/TMEM161B_interactions.html)
-- Genome_Viewer_Functions_hg38.R (functions used for creating visualizations
+- Genome_Viewer_Functions_hg38.R (functions used for creating visualizations)
 - Interaction_Analysis_Functions.R (functions for formatting different datatypes and databases to play nicely)
 - File_Conversions.Rmd (file conversions and liftover for different reference genomes)
 
